@@ -32,3 +32,22 @@ export type AttachContext =
   | { kind: "outside" }
   | { kind: "inside-other"; sessionName: string }
   | { kind: "inside-topencode" };
+
+export type StatusKind =
+  | "working"
+  | "done"
+  | "stalled"
+  | "stale"
+  | "fresh"
+  | "dormant";
+
+export interface SessionStatusView {
+  sessionId: string;
+  title: string;
+  directory: string;
+  kind: StatusKind;
+  heartbeatAgeMs: number | null;
+  lastActivity: number;
+  windowIndex?: number;
+  live: boolean;
+}

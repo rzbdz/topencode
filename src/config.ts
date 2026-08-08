@@ -17,6 +17,7 @@ export const OPT = {
   session: "@oc_session",
   dir: "@oc_dir",
   role: "@oc_role",
+  title: "@oc_title",
 } as const;
 
 export const ROLE = {

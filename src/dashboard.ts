@@ -6,6 +6,8 @@ export interface DashboardActions {
   newSession(directory: string): Promise<void>;
   closeSession(windowId: string): Promise<void>;
   detach(): Promise<void>;
+  exitAll(): Promise<void>;
+  blankTab(directory: string): Promise<void>;
 }
 
 const ESC = "\x1b";
@@ -98,6 +100,8 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   let rightRegion: Region = { x0: 0, x1: 0, y0: 0, y1: 0 };
   let leftColW = 0;
   let detachRegion = { x0: 0, x1: 0, y: 0 };
+  let exitRegion = { x0: 0, x1: 0, y: 0 };
+  let confirmExit = false;
   const closeHits = new Map<number, string>();
 
   let tornDown = false;
@@ -133,12 +137,14 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     };
   }
 
-  function rightRows(): Array<{ kind: "new" } | { kind: "session"; s: SessionView }> {
+  function rightRows(): Array<
+    { kind: "new" } | { kind: "blank" } | { kind: "session"; s: SessionView }
+  > {
     const proj = projects[selectedProject];
     if (!proj) return [];
-    const list: Array<{ kind: "new" } | { kind: "session"; s: SessionView }> = [
-      { kind: "new" },
-    ];
+    const list: Array<
+      { kind: "new" } | { kind: "blank" } | { kind: "session"; s: SessionView }
+    > = [{ kind: "new" }, { kind: "blank" }];
     for (const s of proj.sessions) list.push({ kind: "session", s });
     return list;
   }
@@ -163,15 +169,26 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
     const brand = `${ESC}[48;5;39m${ESC}[38;5;232m${ESC}[1m ⌂ topencode ${ESC}[0m`;
     lines.push(`${ESC}[1;1H${brand}`);
+    const exitLabel = confirmExit ? " ⚠ click again to EXIT ALL " : " ⏻ exit all ";
+    const exitW = exitLabel.length;
+    exitRegion = { x0: cols - exitW + 1, x1: cols, y: 1 };
+    const exitStyle = confirmExit
+      ? `${ESC}[48;5;196m${ESC}[38;5;231m${ESC}[1m`
+      : `${ESC}[48;5;52m${ESC}[38;5;210m`;
+    lines.push(`${ESC}[1;${exitRegion.x0}H${exitStyle}${exitLabel}${ESC}[0m`);
+
     const detachLabel = " ⏏ detach ";
     const detachW = detachLabel.length;
-    detachRegion = { x0: cols - detachW + 1, x1: cols, y: 1 };
+    detachRegion = { x0: exitRegion.x0 - detachW - 1, x1: exitRegion.x0 - 2, y: 1 };
     lines.push(
       `${ESC}[1;${detachRegion.x0}H${ESC}[48;5;238m${ESC}[38;5;255m${detachLabel}${ESC}[0m`,
     );
+
     const hintText = "↑↓ move  ←→ column  ⏎ open  ✕ close  q detach";
-    const hintX = Math.max(detachW + 2, Math.floor((cols - hintText.length) / 2));
-    lines.push(`${ESC}[1;${hintX}H${ESC}[38;5;240m${hintText}${ESC}[0m`);
+    const hintX = Math.max(14, Math.floor((cols - hintText.length) / 2));
+    if (hintX + hintText.length < detachRegion.x0 - 1) {
+      lines.push(`${ESC}[1;${hintX}H${ESC}[38;5;240m${hintText}${ESC}[0m`);
+    }
 
     const proj = projects[selectedProject];
     const leftHdr = focus === "left" ? `${ESC}[38;5;39m▸ PROJECTS` : "PROJECTS";
@@ -232,6 +249,11 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
           lines.push(
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;36m`}${txt}${ESC}[0m`,
           );
+        } else if (row.kind === "blank") {
+          const txt = padEnd(" ▫ Blank tab (shell ⇢ start opencode yourself)", rightW);
+          lines.push(
+            `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;245m`}${txt}${ESC}[0m`,
+          );
         } else {
           const s = row.s;
           const rt = relTime(s.updated);
@@ -270,12 +292,33 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     if (!proj) return;
     if (row.kind === "new") {
       void actions.newSession(proj.directory).then(refresh).catch(() => {});
+    } else if (row.kind === "blank") {
+      void actions.blankTab(proj.directory).then(refresh).catch(() => {});
     } else {
       void actions.openSession(row.s).then(refresh).catch(() => {});
     }
   }
 
   function hitTest(x: number, y: number): void {
+    if (y === exitRegion.y && x >= exitRegion.x0 && x <= exitRegion.x1) {
+      if (confirmExit) {
+        void actions.exitAll().catch(() => {});
+      } else {
+        confirmExit = true;
+        render();
+        setTimeout(() => {
+          if (confirmExit) {
+            confirmExit = false;
+            render();
+          }
+        }, 4000);
+      }
+      return;
+    }
+    if (confirmExit) {
+      confirmExit = false;
+      render();
+    }
     if (y === detachRegion.y && x >= detachRegion.x0 && x <= detachRegion.x1) {
       void actions.detach().catch(() => {});
       return;
@@ -547,6 +590,19 @@ function makeFakeActions(): DashboardActions {
         `detach ${new Date().toISOString()}\n`,
       );
       process.exit(0);
+    },
+    exitAll: async () => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `exitAll ${new Date().toISOString()}\n`,
+      );
+      process.exit(0);
+    },
+    blankTab: async (dir) => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `blankTab ${dir} ${new Date().toISOString()}\n`,
+      );
     },
   };
 }

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { statSync } from "node:fs";
+import { statSync, readdirSync, unlinkSync } from "node:fs";
 import { OPENCODE_BIN } from "./config.ts";
 import type { OpencodeSession } from "./types.ts";
 
@@ -160,6 +160,70 @@ export async function vacuum(): Promise<{ ok: boolean; error?: string }> {
     return { ok: false, error: (err || out).trim().slice(0, 300) };
   }
   return { ok: true };
+}
+
+const STORAGE_DIR = join(DB_PATH, "..", "storage");
+
+const SESSION_KEYED_DIRS = [
+  "session_diff",
+  "directory-readme",
+  "agent-usage-reminder",
+];
+
+export interface OrphanFile {
+  path: string;
+  sessionId: string;
+  bytes: number;
+}
+
+export function findOrphanFiles(): OrphanFile[] {
+  const out: OrphanFile[] = [];
+  let live: Set<string>;
+  try {
+    const db = new Database(DB_PATH, { readonly: true });
+    try {
+      const rows = db.query(`SELECT id FROM session`).all() as Array<{
+        id: string;
+      }>;
+      live = new Set(rows.map((r) => r.id));
+    } finally {
+      db.close();
+    }
+  } catch {
+    return out;
+  }
+  for (const sub of SESSION_KEYED_DIRS) {
+    const dir = join(STORAGE_DIR, sub);
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      if (!name.startsWith("ses_") || !name.endsWith(".json")) continue;
+      const sessionId = name.slice(0, -5);
+      if (live.has(sessionId)) continue;
+      const path = join(dir, name);
+      let bytes = 0;
+      try {
+        bytes = statSync(path).size;
+      } catch {}
+      out.push({ path, sessionId, bytes });
+    }
+  }
+  return out;
+}
+
+export function removeOrphanFiles(files: OrphanFile[]): number {
+  let n = 0;
+  for (const f of files) {
+    try {
+      unlinkSync(f.path);
+      n++;
+    } catch {}
+  }
+  return n;
 }
 
 export function fmtBytes(n: number): string {

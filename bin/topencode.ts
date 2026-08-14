@@ -40,6 +40,8 @@ import {
   vacuum,
   dbSizeBytes,
   fmtBytes,
+  findOrphanFiles,
+  removeOrphanFiles,
 } from "../src/cleanup.ts";
 import { resolve } from "node:path";
 
@@ -203,6 +205,14 @@ async function cmdDelete(ids: string[], force: boolean): Promise<void> {
       console.error(`  \x1b[31m✗\x1b[0m failed ${s.id}: ${r.error ?? "still present"}`);
     }
   }
+  const orphans = findOrphanFiles();
+  if (orphans.length > 0) {
+    const bytes = orphans.reduce((a, o) => a + o.bytes, 0);
+    const n = removeOrphanFiles(orphans);
+    console.log(
+      `  \x1b[32m✓\x1b[0m removed ${n} leftover file(s) opencode does not clean (${fmtBytes(bytes)})`,
+    );
+  }
   console.log(`\n${done}/${targets.length} deleted. Run \`topencode vacuum\` to reclaim disk space.`);
 }
 
@@ -272,6 +282,14 @@ Examples:
     `\n  ${picked.length} session(s), ${fmtBytes(totalBytes)} of message/event data`,
   );
 
+  const existingOrphans = findOrphanFiles();
+  if (existingOrphans.length > 0) {
+    const b = existingOrphans.reduce((a, o) => a + o.bytes, 0);
+    console.log(
+      `  \x1b[2m+ ${existingOrphans.length} leftover file(s) from previously deleted sessions (${fmtBytes(b)}) will also be removed\x1b[0m`,
+    );
+  }
+
   if (!apply) {
     console.log(`\nRe-run with \x1b[1m--apply\x1b[0m to delete.`);
     return;
@@ -292,12 +310,28 @@ Examples:
     else console.error(`  \x1b[31m✗\x1b[0m ${s.id}: ${r.error ?? "still present"}`);
     process.stdout.write(`\r  deleted ${done}/${picked.length}...`);
   }
+  const orphans = findOrphanFiles();
+  if (orphans.length > 0) {
+    const bytes = orphans.reduce((a, o) => a + o.bytes, 0);
+    const n = removeOrphanFiles(orphans);
+    console.log(
+      `\n  \x1b[32m✓\x1b[0m removed ${n} leftover file(s) opencode does not clean (${fmtBytes(bytes)})`,
+    );
+  }
   console.log(
-    `\n\n${done}/${picked.length} deleted. Run \x1b[1mtopencode vacuum\x1b[0m to reclaim disk space.`,
+    `\n${done}/${picked.length} deleted. Run \x1b[1mtopencode vacuum\x1b[0m to reclaim disk space.`,
   );
 }
 
 async function cmdVacuum(): Promise<void> {
+  const orphans = findOrphanFiles();
+  if (orphans.length > 0) {
+    const bytes = orphans.reduce((a, o) => a + o.bytes, 0);
+    const n = removeOrphanFiles(orphans);
+    console.log(
+      `Removed ${n} leftover session file(s) (${fmtBytes(bytes)}) that opencode's delete leaves behind.`,
+    );
+  }
   const before = dbSizeBytes();
   console.log(`Database: ${fmtBytes(before)}`);
   console.log("Running VACUUM (this can take a while on a large database)...");

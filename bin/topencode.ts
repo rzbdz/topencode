@@ -20,6 +20,8 @@ import {
   claimUntaggedTabs,
   newBlankTab,
   adoptRuntimeSessions,
+  cleanDeadPanes,
+  healSession,
 } from "../src/tmux.ts";
 import type { SessionView } from "../src/types.ts";
 import {
@@ -34,6 +36,7 @@ import {
 import { resolve } from "node:path";
 
 async function cmdList(): Promise<void> {
+  await healSession();
   const [sessions, tabs] = await Promise.all([fetchSessions(), listTabs()]);
   const projects = buildProjectViews(sessions, tabs);
   if (projects.length === 0) {
@@ -182,6 +185,7 @@ Usage:
   topencode open <id>       open/select a tab for session id
   topencode new [dir]       start a new opencode session tab (default: cwd)
   topencode close <tab|id>  close a tab (does not delete the session)
+  topencode clean           remove any leftover dead panes
   topencode kill            kill the whole topencode tmux session
 `);
 }
@@ -216,6 +220,12 @@ async function main(): Promise<void> {
       if (!rest[0]) return usage();
       await cmdClose(rest[0]);
       break;
+    case "clean": {
+      await healSession();
+      const n = await cleanDeadPanes();
+      console.log(n === 0 ? "No dead panes." : `Cleaned ${n} dead pane(s).`);
+      break;
+    }
     case "kill":
       await killSession();
       console.log("Killed topencode session.");

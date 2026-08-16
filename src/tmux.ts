@@ -8,6 +8,7 @@ import {
   HISTORY_LIMIT,
   OPT,
   ROLE,
+  MARKER_VALUE,
   dashboardCommand,
 } from "./config.ts";
 
@@ -52,6 +53,7 @@ async function currentClientSession(): Promise<string | null> {
 async function applySessionOptions(): Promise<void> {
   const set = (args: string[]) =>
     tmux(["set-option", "-t", TMUX_SESSION, ...args]);
+  await set([OPT.marker, MARKER_VALUE]);
   await set(["mouse", "on"]);
   await set(["history-limit", String(HISTORY_LIMIT)]);
   await set(["base-index", "0"]);
@@ -77,21 +79,7 @@ async function applySessionOptions(): Promise<void> {
   ]);
   await applyWindowFormats();
 
-  await tmux([
-    "set-hook",
-    "-t",
-    TMUX_SESSION,
-    "pane-died",
-    `if -F "#{==:#{@oc_role},${ROLE.shell}}" "respawn-pane -k -c \\"#{pane_current_path}\\" ${SHELL_BIN}"`,
-  ]);
-  await tmux([
-    "set-hook",
-    "-a",
-    "-t",
-    TMUX_SESSION,
-    "pane-died",
-    `if -F "#{==:#{@oc_role},${ROLE.dashboard}}" "respawn-pane -k ${dashboardCommand()}"`,
-  ]);
+  await applyPaneHooks();
 
   await tmux([
     "bind-key",
@@ -104,11 +92,53 @@ async function applySessionOptions(): Promise<void> {
   ]);
 }
 
+const GUARD = `#{==:#{${OPT.marker}},${MARKER_VALUE}}`;
+
+function and(a: string, b: string): string {
+  return `#{&&:${a},${b}}`;
+}
+
+async function applyPaneHooks(): Promise<void> {
+  await tmux(["set-hook", "-gu", "pane-exited"]);
+  await tmux(["set-hook", "-gu", "pane-died"]);
+
+  const inTab = and(GUARD, "#{!=:#{window_index},0}");
+  await tmux(["set-hook", "-g", "pane-exited", `if -F "${inTab}" kill-window`]);
+
+  const dashboard = and(GUARD, `#{==:#{${OPT.role}},${ROLE.dashboard}}`);
+  await tmux([
+    "set-hook",
+    "-g",
+    "pane-died",
+    `if -F "${dashboard}" "respawn-pane -k ${dashboardCommand()}"`,
+  ]);
+  await tmux(["set-hook", "-ga", "pane-died", `if -F "${inTab}" kill-window`]);
+}
+
+export async function healSession(): Promise<void> {
+  if (!(await sessionExists())) return;
+  await applySessionOptions();
+  for (const tab of await listTabs()) {
+    if (tab.windowIndex === 0) continue;
+    await tmux([
+      "set-option",
+      "-wq",
+      "-t",
+      windowTarget(tab.windowId),
+      "remain-on-exit",
+      "off",
+    ]);
+  }
+}
+
 export async function ensureSession(): Promise<void> {
   const lock = "topencode-boot";
   await tmux(["wait-for", "-L", lock]);
   try {
-    if (await sessionExists()) return;
+    if (await sessionExists()) {
+      await healSession();
+      return;
+    }
     const dashCmd = dashboardCommand();
     await tmux([
       "new-session",
@@ -129,6 +159,14 @@ export async function ensureSession(): Promise<void> {
       ROLE.dashboard,
     ]);
     await tmux(["set-option", "-w", "-t", `${TMUX_SESSION}:0`, "remain-on-exit", "on"]);
+    await tmux([
+      "set-option",
+      "-pq",
+      "-t",
+      `${TMUX_SESSION}:0.0`,
+      "remain-on-exit",
+      "on",
+    ]);
   } finally {
     await tmux(["wait-for", "-U", lock]);
   }
@@ -232,13 +270,13 @@ async function tagWindow(
     directory,
   ]);
   await tmux([
-    "set-option",
-    "-wq",
-    "-t",
-    windowTarget(windowId),
-    "remain-on-exit",
-    "on",
-  ]);
+      "set-option",
+      "-wq",
+      "-t",
+      windowTarget(windowId),
+      "remain-on-exit",
+      "off",
+    ]);
 }
 
 function truncTitle(s: string, max: number): string {
@@ -338,13 +376,13 @@ export async function newSessionTab(directory: string): Promise<void> {
       directory,
     ]);
     await tmux([
-      "set-option",
-      "-wq",
-      "-t",
-      windowTarget(windowId),
-      "remain-on-exit",
-      "on",
-    ]);
+        "set-option",
+        "-wq",
+        "-t",
+        windowTarget(windowId),
+        "remain-on-exit",
+        "off",
+      ]);
     await setWindowTitle(windowId, `＋ ${basename(directory) || directory}`);
     await splitShell(windowId, directory);
     await tagPaneRoles(windowId);
@@ -370,13 +408,13 @@ export async function newBlankTab(directory: string): Promise<void> {
       directory,
     ]);
     await tmux([
-      "set-option",
-      "-wq",
-      "-t",
-      windowTarget(windowId),
-      "remain-on-exit",
-      "on",
-    ]);
+        "set-option",
+        "-wq",
+        "-t",
+        windowTarget(windowId),
+        "remain-on-exit",
+        "off",
+      ]);
     await setWindowTitle(windowId, `▫ shell`);
     await splitShell(windowId, directory);
     await tagPaneRoles(windowId);
@@ -472,6 +510,35 @@ export async function closeTab(ref: string): Promise<boolean> {
   if (target.windowIndex === 0) return false;
   await tmux(["kill-window", "-t", windowTarget(target.windowId)]);
   return true;
+}
+
+export async function cleanDeadPanes(): Promise<number> {
+  if (!(await sessionExists())) return 0;
+  const r = await tmux([
+    "list-panes",
+    "-s",
+    "-t",
+    TMUX_SESSION,
+    "-F",
+    "#{pane_dead}\t#{pane_id}\t#{window_index}",
+  ]);
+  if (r.code !== 0) return 0;
+  const dead = r.stdout
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => l.split("\t"))
+    .filter(([isDead]) => isDead === "1");
+
+  let removed = 0;
+  for (const [, paneId, windowIndex] of dead) {
+    if (!paneId) continue;
+    const cmd =
+      windowIndex === "0"
+        ? ["respawn-pane", "-k", "-t", paneId, dashboardCommand()]
+        : ["kill-pane", "-t", paneId];
+    if (await tmuxOk(cmd)) removed += 1;
+  }
+  return removed;
 }
 
 export async function killSession(): Promise<void> {

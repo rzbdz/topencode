@@ -18,7 +18,18 @@ export const OPT = {
   dir: "@oc_dir",
   role: "@oc_role",
   title: "@oc_title",
+  marker: "@topencode",
 } as const;
+
+/**
+ * Marks the topencode session so global hooks can identify it.
+ *
+ * tmux silently ignores session-scoped `pane-died`/`pane-exited` hooks
+ * (`set-hook -t`), so they must be registered globally (`set-hook -g`) to fire
+ * at all. Every global hook is guarded by this marker so it can never act on
+ * panes belonging to the user's other tmux sessions.
+ */
+export const MARKER_VALUE = "1";
 
 export const ROLE = {
   opencode: "opencode",

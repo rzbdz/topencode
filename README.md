@@ -30,14 +30,34 @@ Each session tab:
 
 ## Install
 
-Requires: tmux 3.0+, zsh, [opencode](https://github.com/sst/opencode), Bun 1.3+.
+```sh
+./install.sh
+```
+
+That's it. The script checks prerequisites, installs Bun if it's missing, builds the binary, and drops it in `~/.local/bin/topencode`. It's idempotent — rerun it any time to upgrade.
+
+Requires tmux 3.0+, zsh, and [opencode](https://github.com/sst/opencode). Bun 1.3+ is installed automatically if absent.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Report what would happen, change nothing |
+| `--mirror` | Force the npmmirror download mirror (China) |
+| `--no-mirror` | Force the official bun.sh installer |
+| `--prefix DIR` | Install somewhere other than `~/.local/bin` |
+| `--skip-shell-rc` | Never touch shell rc files |
+
+Notes:
+
+- **Bun mirror**: by default the script probes `bun.sh` and falls back to npmmirror when it's unreachable, so it works inside and outside China. Proxy variables are bypassed for mirror hosts, since routing a domestic mirror through a foreign proxy defeats the purpose.
+- **opencode discovery**: the script finds your `opencode` binary on `PATH` or in the usual install roots. If it isn't at the default `~/.opencode/bin/opencode`, the script records `TOPENCODE_OPENCODE_BIN` in your shell rc so you don't have to.
+- **PATH**: if `~/.local/bin` isn't on your `PATH`, the script adds it and tells you to reload your shell.
+
+Manual install, if you prefer:
 
 ```sh
 bun install
-bun run install:local     # builds a single binary -> ~/.local/bin/topencode
+bun run install:local
 ```
-
-Make sure `~/.local/bin` is on your `PATH`.
 
 ## Usage
 
@@ -45,9 +65,12 @@ Make sure `~/.local/bin` is on your `PATH`.
 topencode                 # attach (create the tmux session if needed)
 topencode attach          # same as above
 topencode list            # list all sessions grouped by project (plain stdout)
+topencode status          # show status of every open session tab
+topencode watch           # live-refreshing status view
 topencode open <id>       # open/select a tab for a session id
 topencode new [dir]       # start a new opencode session tab (default: cwd)
 topencode close <tab|id>  # close a tab (does NOT delete the opencode session)
+topencode clean           # remove any leftover dead panes
 topencode kill            # kill the whole topencode tmux session
 ```
 
@@ -74,7 +97,9 @@ topencode kill            # kill the whole topencode tmux session
 
 - **Stateless live/dormant model**: a live session is any tmux window in the `topencode` session tagged with `@oc_session`/`@oc_dir`. Dormant = `opencode session list` minus live. No separate state file — state dies with the tmux objects, so closed windows and server restarts self-heal.
 - **Idempotent opens** guarded by `tmux wait-for` locks: opening the same session twice selects the existing tab instead of duplicating.
-- **Auto-respawn**: the zsh pane is tagged `@oc_role=shell`; a `pane-died` hook respawns only shell panes (never opencode), preserving the split.
+- **Exit closes the tab**: session windows run with `remain-on-exit off`, so an exiting pane is destroyed rather than left as a dead placeholder. A `pane-exited` hook then closes the whole tab — quitting opencode *or* typing `exit` in the zsh pane removes the tab, on both clean exit and crash. `topencode clean` clears dead panes left by older versions.
+- **Dashboard resilience**: window 0 alone keeps `remain-on-exit on` and is respawned by a `pane-died` hook, so a dashboard crash can never kill the session.
+- **Hook scoping**: tmux silently ignores session-scoped `pane-died`/`pane-exited` hooks, so these are registered globally and guarded by a `@topencode` session marker — they can never act on your other tmux sessions.
 - All tmux options are set **on the topencode session only** — your global tmux config is untouched.
 
 ### Modules

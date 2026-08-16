@@ -325,20 +325,22 @@ else
   # immediately, so the tab used to vanish on click. Report them up front.
   DB="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
   if [ -f "$DB" ] && command -v "$BUN_CMD" >/dev/null 2>&1; then
+    # The path is passed via the environment because `bun -e` omits the script
+    # slot from argv, so positional indices are not stable.
     # shellcheck disable=SC2016  # ${...} here is JS template syntax, not shell
-    stale=$("$BUN_CMD" -e '
+    stale=$(TOPENCODE_DB="$DB" "$BUN_CMD" -e '
       const { Database } = require("bun:sqlite");
       const { existsSync } = require("node:fs");
       try {
-        const db = new Database(process.argv[2], { readonly: true });
+        const db = new Database(process.env.TOPENCODE_DB, { readonly: true });
         const rows = db.query(
-          "SELECT id, directory, title FROM session WHERE parent_id IS NULL AND time_archived IS NULL"
+          "SELECT id, directory FROM session WHERE parent_id IS NULL AND time_archived IS NULL"
         ).all();
         db.close();
         const bad = rows.filter((r) => !existsSync(r.directory));
         for (const r of bad) console.log(`${r.id}\t${r.directory}`);
       } catch {}
-    ' -- "$DB" 2>/dev/null) || stale=""
+    ' 2>/dev/null) || stale=""
 
     if [ -n "$stale" ]; then
       n=$(printf '%s\n' "$stale" | grep -c .)

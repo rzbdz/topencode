@@ -106,9 +106,6 @@ function and(a: string, b: string): string {
 }
 
 async function applyPaneHooks(): Promise<void> {
-  await tmux(["set-hook", "-gu", "pane-exited"]);
-  await tmux(["set-hook", "-gu", "pane-died"]);
-
   const inTab = and(GUARD, "#{!=:#{window_index},0}");
   await tmux(["set-hook", "-g", "pane-exited", `if -F "${inTab}" kill-window`]);
 
@@ -384,6 +381,19 @@ function missingDirCommand(directory: string, sessionId: string): string {
   )}`;
 }
 
+/**
+ * `remain-on-exit` can only be set after tmux has created the window, so a
+ * command that fails immediately (a bad TOPENCODE_OPENCODE_BIN exits in about a
+ * millisecond) dies before the option applies and the tab-closing hook removes
+ * the tab with no diagnostic. Keeping the pane open from inside the pane's own
+ * process closes that gap: a non-zero exit is held until a key is pressed, while
+ * a clean exit still lets the tab close.
+ */
+function holdOpen(command: string): string {
+  const wrapped = `${command} || { printf '\\n  exited with status %s\\n  press any key to close this tab\\n' "$?"; read -r _; }`;
+  return `${quoteForTmux(SHELL_BIN)} -c ${quoteForTmux(wrapped)}`;
+}
+
 export async function openSessionTab(
   sessionId: string,
   directory: string,
@@ -398,16 +408,17 @@ export async function openSessionTab(
       await selectWindow(existing.windowId);
       return;
     }
-    const launch = existsSync(directory)
-      ? `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)} -s ${quoteForTmux(sessionId)}`
+    const dirOk = existsSync(directory);
+    const launch = dirOk
+      ? holdOpen(
+          `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)} -s ${quoteForTmux(sessionId)}`,
+        )
       : missingDirCommand(directory, sessionId);
-    const windowId = await createTabWindow(
-      existsSync(directory) ? directory : homedir(),
-      launch,
-    );
+    const cwd = dirOk ? directory : homedir();
+    const windowId = await createTabWindow(cwd, launch);
     await tagWindow(windowId, sessionId, directory);
     if (title) await setWindowTitle(windowId, title);
-    await splitShell(windowId, directory);
+    await splitShell(windowId, cwd);
     await tagPaneRoles(windowId);
     await focusOpencodePane(windowId);
     await selectWindow(windowId);
@@ -421,7 +432,9 @@ export async function newSessionTab(directory: string): Promise<void> {
   const lock = "topencode-open";
   await tmux(["wait-for", "-L", lock]);
   try {
-    const launch = `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)}`;
+    const launch = holdOpen(
+      `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)}`,
+    );
     const windowId = await createTabWindow(directory, launch);
     await tmux([
       "set-option",

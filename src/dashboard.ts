@@ -267,10 +267,14 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
             );
             lines.push(`${ESC}[${y};${rightRegion.x0}H${selOn}${body}${selOff}`);
           } else {
-            const dot = s.live
-              ? `${ESC}[38;5;42m●${ESC}[0m`
-              : `${ESC}[38;5;244m○${ESC}[0m`;
-            const body = ` ${dot} ${padEnd(t, titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`;
+            const dot = s.missingDir
+              ? `${ESC}[38;5;203m⚠${ESC}[0m`
+              : s.live
+                ? `${ESC}[38;5;42m●${ESC}[0m`
+                : `${ESC}[38;5;244m○${ESC}[0m`;
+            const titleColor = s.missingDir ? `${ESC}[38;5;240m` : "";
+            const titleOff = s.missingDir ? `${ESC}[0m` : "";
+            const body = ` ${dot} ${titleColor}${padEnd(t, titleW)}${titleOff} ${ESC}[38;5;244m${rt}${ESC}[0m`;
             lines.push(`${ESC}[${y};${rightRegion.x0}H${body}`);
           }
           if (s.live && s.windowId) {

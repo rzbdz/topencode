@@ -1,4 +1,6 @@
 import { basename } from "node:path";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import type { LiveTab, AttachContext } from "./types.ts";
 import {
   TMUX_SESSION,
@@ -10,6 +12,7 @@ import {
   ROLE,
   MARKER_VALUE,
   dashboardCommand,
+  quoteArg,
 } from "./config.ts";
 
 async function tmux(
@@ -56,6 +59,10 @@ async function applySessionOptions(): Promise<void> {
   await set([OPT.marker, MARKER_VALUE]);
   await set(["mouse", "on"]);
   await set(["history-limit", String(HISTORY_LIMIT)]);
+  await set([
+    "remain-on-exit-format",
+    "#[fg=colour203,bold] ✗ exited #{pane_dead_status} #[default]#[fg=colour245] scroll up for the error · Ctrl-b & to close this tab#[default]",
+  ]);
   await set(["base-index", "0"]);
   await set(["pane-base-index", "0"]);
   await set(["renumber-windows", "on"]);
@@ -112,7 +119,6 @@ async function applyPaneHooks(): Promise<void> {
     "pane-died",
     `if -F "${dashboard}" "respawn-pane -k ${dashboardCommand()}"`,
   ]);
-  await tmux(["set-hook", "-ga", "pane-died", `if -F "${inTab}" kill-window`]);
 }
 
 export async function healSession(): Promise<void> {
@@ -121,13 +127,25 @@ export async function healSession(): Promise<void> {
   for (const tab of await listTabs()) {
     if (tab.windowIndex === 0) continue;
     await tmux([
-      "set-option",
-      "-wq",
-      "-t",
-      windowTarget(tab.windowId),
-      "remain-on-exit",
-      "off",
-    ]);
+        "set-option",
+        "-wq",
+        "-t",
+        windowTarget(tab.windowId),
+        "remain-on-exit",
+        "failed",
+      ]);
+  }
+  const panes = await tmux([
+    "list-panes",
+    "-s",
+    "-t",
+    TMUX_SESSION,
+    "-F",
+    `#{pane_id}\t#{${OPT.role}}`,
+  ]);
+  for (const line of panes.stdout.split("\n").filter((l) => l.length > 0)) {
+    const [paneId, role] = line.split("\t");
+    if (paneId && role === ROLE.shell) await denyPassthrough(paneId);
   }
 }
 
@@ -275,7 +293,7 @@ async function tagWindow(
       "-t",
       windowTarget(windowId),
       "remain-on-exit",
-      "off",
+      "failed",
     ]);
 }
 
@@ -326,11 +344,44 @@ async function tagPaneRoles(windowId: string): Promise<void> {
     if (!paneId) continue;
     const role = idx === "0" ? ROLE.opencode : ROLE.shell;
     await tmux(["set-option", "-pq", "-t", paneId, OPT.role, role]);
+    if (role === ROLE.shell) await denyPassthrough(paneId);
   }
+}
+
+/**
+ * opencode asks the terminal for its colours with OSC 10/11. The reply is
+ * delivered to whichever pane holds focus, so clicking the status bar can route
+ * it to the shell, which echoes it as `rgb:...` garbage at the prompt. This is
+ * pane-scoped, so the user's global allow-passthrough is left alone.
+ */
+async function denyPassthrough(paneId: string): Promise<void> {
+  await tmux(["set-option", "-pq", "-t", paneId, "allow-passthrough", "off"]);
 }
 
 async function focusOpencodePane(windowId: string): Promise<void> {
   await tmux(["select-pane", "-t", `${windowTarget(windowId)}.0`]);
+}
+
+/**
+ * opencode exits with status 0 when its directory is gone, which is
+ * indistinguishable from a normal quit, so the tab-closing hook would make the
+ * tab vanish before the error could be read. Keep the pane alive instead.
+ */
+function missingDirCommand(directory: string, sessionId: string): string {
+  const msg = [
+    "",
+    "  This session's directory no longer exists:",
+    `    ${directory}`,
+    "",
+    `  session: ${sessionId}`,
+    "",
+    "  Recreate the directory to resume, or archive the session:",
+    `    opencode session archive ${sessionId}`,
+    "",
+  ].join("\n");
+  return `${quoteForTmux(SHELL_BIN)} -c ${quoteForTmux(
+    `printf '%s\\n' ${quoteArg(msg)}; read -r _`,
+  )}`;
 }
 
 export async function openSessionTab(
@@ -347,8 +398,13 @@ export async function openSessionTab(
       await selectWindow(existing.windowId);
       return;
     }
-    const launch = `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)} -s ${quoteForTmux(sessionId)}`;
-    const windowId = await createTabWindow(directory, launch);
+    const launch = existsSync(directory)
+      ? `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)} -s ${quoteForTmux(sessionId)}`
+      : missingDirCommand(directory, sessionId);
+    const windowId = await createTabWindow(
+      existsSync(directory) ? directory : homedir(),
+      launch,
+    );
     await tagWindow(windowId, sessionId, directory);
     if (title) await setWindowTitle(windowId, title);
     await splitShell(windowId, directory);
@@ -381,7 +437,7 @@ export async function newSessionTab(directory: string): Promise<void> {
         "-t",
         windowTarget(windowId),
         "remain-on-exit",
-        "off",
+        "failed",
       ]);
     await setWindowTitle(windowId, `＋ ${basename(directory) || directory}`);
     await splitShell(windowId, directory);
@@ -413,7 +469,7 @@ export async function newBlankTab(directory: string): Promise<void> {
         "-t",
         windowTarget(windowId),
         "remain-on-exit",
-        "off",
+        "failed",
       ]);
     await setWindowTitle(windowId, `▫ shell`);
     await splitShell(windowId, directory);

@@ -303,14 +303,57 @@ if [ -n "$OPENCODE_PATH" ] && [ "$OPENCODE_PATH" != "$HOME/.opencode/bin/opencod
   fi
 fi
 
-# Older builds left tab windows with remain-on-exit=on, which stranded dead
-# panes. A running session picks up the new hooks on the next command.
-if [ "$DRY_RUN" != 1 ] && tmux has-session -t "${TOPENCODE_SESSION:-topencode}" 2>/dev/null; then
-  step "Existing session detected"
+# A session started by an older build carries stale hooks and window options.
+# `clean` reapplies them and clears dead panes, so a running session is repaired
+# in place without being restarted.
+if [ "$DRY_RUN" != 1 ] && command -v tmux >/dev/null 2>&1 &&
+   tmux has-session -t "${TOPENCODE_SESSION:-topencode}" 2>/dev/null; then
+  step "Repairing the running session"
   if "$PREFIX/topencode" clean >/dev/null 2>&1; then
-    ok "refreshed hooks and cleaned dead panes in the running session"
+    ok "reapplied hooks, reset window options, cleared dead panes"
   else
-    warn "could not refresh the running session; run 'topencode clean' yourself"
+    warn "could not repair automatically; run 'topencode clean' yourself"
+  fi
+fi
+
+step "Checking session health"
+
+if [ "$DRY_RUN" = 1 ]; then
+  info "would report sessions whose directory no longer exists"
+else
+  # A session whose directory was deleted cannot be resumed: opencode exits
+  # immediately, so the tab used to vanish on click. Report them up front.
+  DB="${OPENCODE_DB_PATH:-$HOME/.local/share/opencode/opencode.db}"
+  if [ -f "$DB" ] && command -v "$BUN_CMD" >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # ${...} here is JS template syntax, not shell
+    stale=$("$BUN_CMD" -e '
+      const { Database } = require("bun:sqlite");
+      const { existsSync } = require("node:fs");
+      try {
+        const db = new Database(process.argv[2], { readonly: true });
+        const rows = db.query(
+          "SELECT id, directory, title FROM session WHERE parent_id IS NULL AND time_archived IS NULL"
+        ).all();
+        db.close();
+        const bad = rows.filter((r) => !existsSync(r.directory));
+        for (const r of bad) console.log(`${r.id}\t${r.directory}`);
+      } catch {}
+    ' -- "$DB" 2>/dev/null) || stale=""
+
+    if [ -n "$stale" ]; then
+      n=$(printf '%s\n' "$stale" | grep -c .)
+      warn "$n session(s) reference a directory that no longer exists"
+      printf '%s\n' "$stale" | while IFS="$(printf '\t')" read -r sid sdir; do
+        [ -n "$sid" ] || continue
+        info "$sdir"
+      done
+      info "These now open a tab explaining the problem instead of vanishing."
+      info "To hide one permanently: opencode session archive <id>"
+    else
+      ok "all sessions point at existing directories"
+    fi
+  else
+    info "skipped (opencode DB not found)"
   fi
 fi
 

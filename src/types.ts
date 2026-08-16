@@ -19,6 +19,7 @@ export interface SessionView extends OpencodeSession {
   live: boolean;
   windowIndex?: number;
   windowId?: string;
+  missingDir?: boolean;
 }
 
 export interface ProjectView {

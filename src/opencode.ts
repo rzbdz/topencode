@@ -7,6 +7,7 @@ import type {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { basename } from "node:path";
+import { existsSync } from "node:fs";
 import { Database } from "bun:sqlite";
 
 const DB_PATH =
@@ -110,14 +111,21 @@ export function buildProjectViews(
       });
   }
 
+  const dirExists = new Map<string, boolean>();
   const byDir = new Map<string, SessionView[]>();
   for (const s of sessions) {
     const hit = liveBySession.get(s.id);
+    let exists = dirExists.get(s.directory);
+    if (exists === undefined) {
+      exists = existsSync(s.directory);
+      dirExists.set(s.directory, exists);
+    }
     const view: SessionView = {
       ...s,
       live: hit !== undefined,
       windowIndex: hit?.windowIndex,
       windowId: hit?.windowId,
+      missingDir: !exists,
     };
     const arr = byDir.get(s.directory) ?? [];
     arr.push(view);

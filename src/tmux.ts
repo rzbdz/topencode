@@ -1,4 +1,6 @@
-import { basename } from "node:path";
+import { basename, join } from "node:path";
+import { homedir } from "node:os";
+import { statSync } from "node:fs";
 import type { LiveTab, AttachContext } from "./types.ts";
 import {
   TMUX_SESSION,
@@ -619,6 +621,70 @@ export async function reapplyConfig(): Promise<void> {
   if (!(await sessionExists())) return;
   await applySessionOptions();
   await applyWindowFormats();
+  await sourceShellRc();
+  await syncProxyEnv();
+}
+
+async function syncProxyEnv(): Promise<void> {
+  const vars = [
+    "http_proxy",
+    "https_proxy",
+    "ftp_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "FTP_PROXY",
+    "NO_PROXY",
+  ];
+  for (const v of vars) {
+    const val = process.env[v];
+    if (val !== undefined) {
+      await tmux(["set-environment", "-t", TMUX_SESSION, v, val]);
+    }
+  }
+}
+
+async function sourceShellRc(): Promise<void> {
+  const shell = process.env.SHELL ?? "/bin/bash";
+  const home = homedir();
+  let rcFiles: string[] = [];
+  if (shell.includes("zsh")) {
+    rcFiles = [join(home, ".zshrc"), join(home, ".zprofile")];
+  } else if (shell.includes("bash")) {
+    rcFiles = [
+      join(home, ".bash_profile"),
+      join(home, ".bashrc"),
+      join(home, ".profile"),
+    ];
+  }
+  const existing = rcFiles.filter((f) => {
+    try {
+      statSync(f);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (existing.length === 0) return;
+  const cmd =
+    shell.includes("zsh") ? `source ${existing[0]}` : `. ${existing[0]}`;
+  const proc = Bun.spawn([shell, "-c", `${cmd}; env`], {
+    stdout: "pipe",
+    stderr: "ignore",
+    env: process.env,
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  const lines = out.split("\n");
+  for (const line of lines) {
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const k = line.slice(0, eq);
+    const v = line.slice(eq + 1);
+    if (k && v && !k.startsWith("_") && k.match(/^[A-Za-z_][A-Za-z0-9_]*$/)) {
+      await tmux(["set-environment", "-t", TMUX_SESSION, k, v]);
+    }
+  }
 }
 
 export async function attach(): Promise<void> {

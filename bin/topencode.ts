@@ -44,6 +44,7 @@ import {
   removeOrphanFiles,
 } from "../src/cleanup.ts";
 import { resolve } from "node:path";
+import { checkOpencode } from "../src/config.ts";
 
 async function cmdList(): Promise<void> {
   const [sessions, tabs] = await Promise.all([fetchSessions(), listTabs()]);
@@ -381,6 +382,7 @@ function makeActions(): DashboardActions {
     blankTab: async (directory: string) => {
       await newBlankTab(directory);
     },
+    checkHealth: async () => checkOpencode(),
   };
 }
 

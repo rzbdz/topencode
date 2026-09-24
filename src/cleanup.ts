@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { statSync, readdirSync, unlinkSync } from "node:fs";
-import { OPENCODE_BIN } from "./config.ts";
+import { opencodeBin } from "./config.ts";
 import type { OpencodeSession } from "./types.ts";
 
 const DB_PATH =
@@ -27,12 +27,21 @@ export async function deleteSession(
   sessionId: string,
   directory: string,
 ): Promise<DeleteResult> {
-  const proc = Bun.spawn([OPENCODE_BIN, "session", "delete", sessionId], {
-    cwd: directory,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
-  });
+  let proc;
+  try {
+    proc = Bun.spawn([opencodeBin(), "session", "delete", sessionId], {
+      cwd: directory,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
+    });
+  } catch (err) {
+    return {
+      sessionId,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
   const [out, err] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -146,11 +155,16 @@ export function dbSizeBytes(): number {
 }
 
 export async function vacuum(): Promise<{ ok: boolean; error?: string }> {
-  const proc = Bun.spawn([OPENCODE_BIN, "db", "VACUUM"], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
-  });
+  let proc;
+  try {
+    proc = Bun.spawn([opencodeBin(), "db", "VACUUM"], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
+    });
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
   const [out, err] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

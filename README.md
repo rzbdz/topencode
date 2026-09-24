@@ -66,9 +66,26 @@ topencode kill            # kill the whole topencode tmux session
 | Var | Default | Meaning |
 |---|---|---|
 | `TOPENCODE_SESSION` | `topencode` | tmux session name |
-| `TOPENCODE_OPENCODE_BIN` | `~/.opencode/bin/opencode` | opencode binary path |
+| `TOPENCODE_OPENCODE_BIN` | `~/.opencode/bin/opencode` | opencode binary path (see below) |
 | `TOPENCODE_SHELL` | `zsh` | right-pane shell |
 | `TOPENCODE_SHELL_PCT` | `35` | right-pane width % |
+
+### Choosing the opencode binary
+
+The default path is used when it is a runnable file. If it is missing, empty
+(0 bytes — what a truncated `opencode upgrade` leaves behind), or not
+executable, topencode falls back to the `opencode` on `PATH` instead of
+launching a binary that would die instantly and leave the pane reading
+`Pane is dead`. Resolution is re-run on every tab open, so repairing the
+binary takes effect without restarting anything.
+
+`TOPENCODE_OPENCODE_BIN` is treated as a deliberate instruction and is never
+silently bypassed: if you point it at a broken file, you get an error naming
+that file rather than a quiet fallback.
+
+When no usable binary can be found, the dashboard shows an
+`⚠ opencode unusable — …` line on its bottom row, and opening a tab prints the
+same reason inside the pane instead of exec'ing the bad binary.
 
 ## Architecture
 

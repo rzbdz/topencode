@@ -2,7 +2,7 @@ import { basename } from "node:path";
 import type { LiveTab, AttachContext } from "./types.ts";
 import {
   TMUX_SESSION,
-  OPENCODE_BIN,
+  opencodeBin,
   SHELL_BIN,
   SHELL_PANE_PERCENT,
   HISTORY_LIMIT,
@@ -301,6 +301,29 @@ function shellLaunch(command: string): string {
   return `${quoteForTmux(SHELL_BIN)} -il ${c}`;
 }
 
+// Shown inside the pane instead of exec'ing a binary we know is broken, so the
+// failure is readable in the tab rather than just "Pane is dead".
+function errorLaunch(message: string): string {
+  const body = [
+    `printf '%s\\n\\n' ${quoteForTmux(`topencode: cannot start opencode — ${message}`)}`,
+    `printf '%s\\n' 'Fix the binary, then reopen this session from the dashboard (no restart needed).'`,
+    `exec ${quoteForTmux(SHELL_BIN)} -il`,
+  ].join("; ");
+  return `${quoteForTmux(SHELL_BIN)} -c ${quoteForTmux(body)}`;
+}
+
+// Resolution is re-probed per open, so repairing opencode needs no restart.
+function opencodeLaunch(directory: string, sessionArg: string): string {
+  let bin: string;
+  try {
+    bin = opencodeBin();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return errorLaunch(message);
+  }
+  return shellLaunch(`${quoteForTmux(bin)} ${quoteForTmux(directory)}${sessionArg}`);
+}
+
 export async function openSessionTab(
   sessionId: string,
   directory: string,
@@ -315,8 +338,7 @@ export async function openSessionTab(
       await selectWindow(existing.windowId);
       return;
     }
-    const command = `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)} -s ${quoteForTmux(sessionId)}`;
-    const launch = shellLaunch(command);
+    const launch = opencodeLaunch(directory, ` -s ${quoteForTmux(sessionId)}`);
     const windowId = await createTabWindow(directory, launch);
     await tagWindow(windowId, sessionId, directory);
     if (title) await setWindowTitle(windowId, title);
@@ -334,8 +356,7 @@ export async function newSessionTab(directory: string): Promise<void> {
   const lock = "topencode-open";
   await tmux(["wait-for", "-L", lock]);
   try {
-    const command = `${quoteForTmux(OPENCODE_BIN)} ${quoteForTmux(directory)}`;
-    const launch = shellLaunch(command);
+    const launch = opencodeLaunch(directory, "");
     const windowId = await createTabWindow(directory, launch);
     await tmux([
       "set-option",

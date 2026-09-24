@@ -1,5 +1,12 @@
 import type { ProjectView, SessionView } from "./types.ts";
 
+export interface HealthReport {
+  ok: boolean;
+  path?: string;
+  version?: string;
+  problem?: string;
+}
+
 export interface DashboardActions {
   loadProjects(): Promise<ProjectView[]>;
   openSession(session: SessionView): Promise<void>;
@@ -8,6 +15,8 @@ export interface DashboardActions {
   detach(): Promise<void>;
   exitAll(): Promise<void>;
   blankTab(directory: string): Promise<void>;
+  /** Optional probe of the opencode binary; a failure is surfaced on the bottom row. */
+  checkHealth?(): Promise<HealthReport>;
 }
 
 const ESC = "\x1b";
@@ -103,6 +112,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   let exitRegion = { x0: 0, x1: 0, y: 0 };
   let confirmExit = false;
   const closeHits = new Map<number, string>();
+  let health: HealthReport | null = null;
 
   let tornDown = false;
 
@@ -279,6 +289,15 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
           }
         }
       }
+    }
+
+    // Last row: opencode health. A broken binary is the difference between
+    // "this tab is broken" and "you cannot open any tab", so it is worth a line.
+    if (health && !health.ok) {
+      const msg = truncate(`⚠ opencode unusable — ${health.problem ?? "unknown"}`, cols - 2);
+      lines.push(
+        `${ESC}[${rows};1H${ESC}[48;5;52m${ESC}[38;5;210m ${padEnd(msg, cols - 1)}${ESC}[0m`,
+      );
     }
 
     write(lines.join(""));
@@ -499,8 +518,23 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
   await refresh();
 
+  const recheckHealth = async () => {
+    if (!actions.checkHealth) return;
+    try {
+      health = await actions.checkHealth();
+    } catch (err) {
+      health = {
+        ok: false,
+        problem: err instanceof Error ? err.message : String(err),
+      };
+    }
+    render();
+  };
+  void recheckHealth();
+
   const refreshInterval = setInterval(() => {
     void refresh();
+    void recheckHealth();
   }, 5000);
 
   inp.on("data", feed);

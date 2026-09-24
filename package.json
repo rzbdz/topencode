@@ -10,7 +10,7 @@
     "dev": "bun run bin/topencode.ts",
     "dashboard": "bun run src/dashboard.ts",
     "build": "bun build --compile --minify bin/topencode.ts --outfile dist/topencode",
-    "install:local": "bun run build && mkdir -p ~/.local/bin && cp dist/topencode ~/.local/bin/topencode && echo 'installed to ~/.local/bin/topencode'",
+    "install:local": "bun run build && mkdir -p ~/.local/bin && cp dist/topencode ~/.local/bin/.topencode.new && mv -f ~/.local/bin/.topencode.new ~/.local/bin/topencode && echo 'installed to ~/.local/bin/topencode'",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

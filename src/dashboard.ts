@@ -1,4 +1,5 @@
 import type { ProjectView, SessionView } from "./types.ts";
+import { P } from "./profile.ts";
 
 export interface HealthReport {
   ok: boolean;
@@ -15,7 +16,7 @@ export interface DashboardActions {
   detach(): Promise<void>;
   exitAll(): Promise<void>;
   blankTab(directory: string): Promise<void>;
-  /** Optional probe of the opencode binary; a failure is surfaced on the bottom row. */
+  /** Optional probe of the agent binary; a failure is surfaced on the bottom row. */
   checkHealth?(): Promise<HealthReport>;
 }
 
@@ -177,7 +178,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     const lines: string[] = [];
     lines.push(`${ESC}[H${ESC}[2J`);
 
-    const brand = `${ESC}[48;5;39m${ESC}[38;5;232m${ESC}[1m ⌂ topencode ${ESC}[0m`;
+    const brand = `${ESC}[48;5;39m${ESC}[38;5;232m${ESC}[1m ⌂ ${P().name} ${ESC}[0m`;
     lines.push(`${ESC}[1;1H${brand}`);
     const exitLabel = confirmExit ? " ⚠ click again to EXIT ALL " : " ⏻ exit all ";
     const exitW = exitLabel.length;
@@ -260,7 +261,10 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;36m`}${txt}${ESC}[0m`,
           );
         } else if (row.kind === "blank") {
-          const txt = padEnd(" ▫ Blank tab (shell ⇢ start opencode yourself)", rightW);
+          const txt = padEnd(
+            ` ▫ Blank tab (shell ⇢ start ${P().agentName} yourself)`,
+            rightW,
+          );
           lines.push(
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;245m`}${txt}${ESC}[0m`,
           );
@@ -291,10 +295,13 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
       }
     }
 
-    // Last row: opencode health. A broken binary is the difference between
+    // Last row: agent health. A broken binary is the difference between
     // "this tab is broken" and "you cannot open any tab", so it is worth a line.
     if (health && !health.ok) {
-      const msg = truncate(`⚠ opencode unusable — ${health.problem ?? "unknown"}`, cols - 2);
+      const msg = truncate(
+        `⚠ ${P().agentName} unusable — ${health.problem ?? "unknown"}`,
+        cols - 2,
+      );
       lines.push(
         `${ESC}[${rows};1H${ESC}[48;5;52m${ESC}[38;5;210m ${padEnd(msg, cols - 1)}${ESC}[0m`,
       );

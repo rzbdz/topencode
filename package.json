@@ -1,16 +1,22 @@
 {
   "name": "topencode",
-  "version": "0.1.1",
-  "description": "TUI + tmux + opencode: manage multiple opencode projects & sessions as mouse-driven tabs, attachable over ssh",
+  "version": "0.2.0",
+  "description": "TUI + tmux session manager for coding agents (opencode and Claude Code), attachable over ssh",
   "type": "module",
   "bin": {
-    "topencode": "./bin/topencode.ts"
+    "topencode": "./bin/topencode.ts",
+    "tclaude": "./bin/tclaude.ts"
   },
   "scripts": {
     "dev": "bun run bin/topencode.ts",
+    "dev:tclaude": "bun run bin/tclaude.ts",
     "dashboard": "bun run src/dashboard.ts",
     "build": "bun build --compile --minify bin/topencode.ts --outfile dist/topencode",
+    "build:tclaude": "bun build --compile --minify bin/tclaude.ts --outfile dist/tclaude",
+    "build:all": "bun run build && bun run build:tclaude",
     "install:local": "bun run build && mkdir -p ~/.local/bin && cp dist/topencode ~/.local/bin/.topencode.new && mv -f ~/.local/bin/.topencode.new ~/.local/bin/topencode && echo 'installed to ~/.local/bin/topencode'",
+    "install:local:tclaude": "bun run build:tclaude && mkdir -p ~/.local/bin && cp dist/tclaude ~/.local/bin/.tclaude.new && mv -f ~/.local/bin/.tclaude.new ~/.local/bin/tclaude && echo 'installed to ~/.local/bin/tclaude'",
+    "install:all": "bun run install:local && bun run install:local:tclaude",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

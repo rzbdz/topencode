@@ -1,33 +1,8 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { statSync, accessSync, constants } from "node:fs";
 
-export const TMUX_SESSION = process.env.TOPENCODE_SESSION ?? "topencode";
-
-export const PINNED_OPENCODE_BIN =
-  process.env.TOPENCODE_OPENCODE_BIN ??
-  join(homedir(), ".opencode", "bin", "opencode");
-
-export const SHELL_BIN = process.env.TOPENCODE_SHELL ?? "zsh";
-
-export const SHELL_PANE_PERCENT = Number(process.env.TOPENCODE_SHELL_PCT ?? 35);
-
-export const HISTORY_LIMIT = 50000;
-
-export const OPT = {
-  session: "@oc_session",
-  dir: "@oc_dir",
-  role: "@oc_role",
-  title: "@oc_title",
-} as const;
-
-export const ROLE = {
-  opencode: "opencode",
-  shell: "shell",
-  dashboard: "dashboard",
-} as const;
-
-export const DASHBOARD_MARKER = "__topencode_dashboard__";
+export function quoteArg(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 
 type Unusable = "empty" | "missing" | "not-exec";
 
@@ -53,148 +28,59 @@ function explain(path: string, why: Unusable): string {
   return `${path} does not exist`;
 }
 
-export interface OpencodeBin {
+export interface BinChoice {
   path: string;
-  /** Where the path came from — "env" is TOPENCODE_OPENCODE_BIN, "pinned" the default location, "path" a PATH lookup. */
+  /** Where the path came from — "env" is the product's override variable. */
   source: "env" | "pinned" | "path";
 }
 
 /**
- * Resolve a *working* opencode binary. A pinned path that is present but
- * unusable (truncated download, wrong arch, missing +x) falls through to PATH
- * instead of being launched, since tmux would otherwise report the pane dead
- * with no clue why.
+ * Resolve a *working* agent binary. A pinned path that is present but unusable
+ * (truncated download, wrong arch, missing +x) falls through to PATH instead of
+ * being launched, since tmux would otherwise report the pane dead with no clue
+ * why.
  *
- * An explicit TOPENCODE_OPENCODE_BIN is never silently ignored: if the user
- * named a binary, a broken one is an error worth showing, not a path to
- * quietly route around.
+ * An explicit override variable is never silently ignored: if the user named a
+ * binary, a broken one is an error worth showing, not a path to quietly route
+ * around.
  */
-export function chooseOpencodeBin(
-  fromEnv: string | undefined,
-  pinned: string,
-  lookup: (name: string) => string | null,
-): OpencodeBin {
+export function chooseAgentBin(opts: {
+  agentName: string;
+  envName: string;
+  fromEnv: string | undefined;
+  /** Default install location to try before falling back to PATH. */
+  pinned?: string;
+  lookup: (name: string) => string | null;
+  installHint: string;
+}): BinChoice {
+  const { agentName, envName, fromEnv, pinned, lookup, installHint } = opts;
+
   if (fromEnv) {
     const why = unusableReason(fromEnv);
     if (why) {
-      throw new Error(
-        `TOPENCODE_OPENCODE_BIN=${fromEnv} is unusable: ${explain(fromEnv, why)}`,
-      );
+      throw new Error(`${envName}=${fromEnv} is unusable: ${explain(fromEnv, why)}`);
     }
     return { path: fromEnv, source: "env" };
   }
 
-  const pinnedWhy = unusableReason(pinned);
-  if (!pinnedWhy) return { path: pinned, source: "pinned" };
+  const pinnedWhy = pinned ? unusableReason(pinned) : "missing";
+  if (pinned && !pinnedWhy) return { path: pinned, source: "pinned" };
 
-  const found = lookup("opencode");
+  const found = lookup(agentName);
   if (found && !unusableReason(found)) return { path: found, source: "path" };
 
   throw new Error(
-    `no usable opencode binary: ${explain(pinned, pinnedWhy)}` +
-      (found ? `, and the opencode on PATH (${found}) is unusable too` : "") +
-      `. Install opencode, or point TOPENCODE_OPENCODE_BIN at a working binary.`,
+    `no usable ${agentName} binary: ${pinned ? explain(pinned, pinnedWhy as Unusable) : `${agentName} is not on PATH`}` +
+      (found ? `, and the ${agentName} on PATH (${found}) is unusable too` : "") +
+      `. ${installHint}`,
   );
-}
-
-export function resolveOpencodeBin(): OpencodeBin {
-  return chooseOpencodeBin(
-    process.env.TOPENCODE_OPENCODE_BIN,
-    PINNED_OPENCODE_BIN,
-    (name) => Bun.which(name),
-  );
-}
-
-/** Re-probed on every tab open, so repairing opencode needs no restart. */
-export function opencodeBin(): string {
-  return resolveOpencodeBin().path;
-}
-
-export interface OpencodeHealth {
-  ok: boolean;
-  path?: string;
-  source?: OpencodeBin["source"];
-  /** Raw `opencode --version` output when it ran. */
-  version?: string;
-  /** Human-readable reason it is not usable. */
-  problem?: string;
-}
-
-/**
- * Full health check: resolves the path and actually runs `opencode --version`,
- * so a binary that exists but cannot execute is caught before the dashboard
- * offers to open tabs with it.
- *
- * The probe spawns a large binary, so a result that is already good is reused
- * for `minIntervalMs` — the dashboard calls this on every refresh, and
- * re-spawning opencode twice a minute would be a waste. A failing check is
- * always re-run, so repairing the binary clears the warning promptly.
- */
-let healthy: { key: string; at: number; health: OpencodeHealth } | null = null;
-
-export async function checkOpencode(
-  minIntervalMs = 60_000,
-  timeoutMs = 8000,
-): Promise<OpencodeHealth> {
-  let bin: OpencodeBin;
-  try {
-    bin = resolveOpencodeBin();
-  } catch (err) {
-    healthy = null;
-    return {
-      ok: false,
-      problem: err instanceof Error ? err.message : String(err),
-    };
-  }
-
-  // Static checks pass, but they say nothing about the file's *contents* — a
-  // truncated or wrong-arch binary is executable and non-empty. Key the cache
-  // on size+mtime too, so an in-place replacement re-probes.
-  const st = statSync(bin.path);
-  const key = `${bin.path}:${st.size}:${st.mtimeMs}`;
-  if (healthy && healthy.key === key && Date.now() - healthy.at < minIntervalMs) {
-    return healthy.health;
-  }
-
-  const proc = Bun.spawn([bin.path, "--version"], {
-    stdout: "pipe",
-    stderr: "pipe",
-    env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
-  });
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const code = await proc.exited;
-  clearTimeout(timer);
-
-  if (code !== 0) {
-    const detail = (err || out).trim().split("\n")[0] ?? "";
-    healthy = null;
-    return {
-      ok: false,
-      path: bin.path,
-      source: bin.source,
-      problem:
-        `${bin.path} exited ${code} on --version` + (detail ? `: ${detail}` : ""),
-    };
-  }
-  const health: OpencodeHealth = {
-    ok: true,
-    path: bin.path,
-    source: bin.source,
-    version: out.trim().split("\n").pop()?.trim(),
-  };
-  healthy = { key, at: Date.now(), health };
-  return health;
 }
 
 /**
  * Command tmux runs (and the `pane-died` hook respawns) for the dashboard pane.
  *
  * A compiled binary re-enters itself with the `dashboard` subcommand. Under
- * `bun run bin/topencode.ts`, though, execPath is the bun runtime, which has no
+ * `bun run bin/<product>.ts`, though, execPath is the bun runtime, which has no
  * such subcommand — `bun dashboard` fails with "Script not found". Point bun at
  * the entry script explicitly in that case.
  */
@@ -205,6 +91,86 @@ export function dashboardCommand(): string {
   return `${quoteArg(process.execPath)} run ${quoteArg(Bun.main)} dashboard`;
 }
 
-export function quoteArg(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
+/**
+ * Run `command` under the user's interactive login shell. Must be interactive
+ * and login: `-l` alone skips ~/.zshrc where proxy envs live.
+ *
+ * `exec: false` keeps that shell alive around `command`, so a chained fallback
+ * shell still runs after the agent exits — that is what keeps a tab usable
+ * rather than "Pane is dead" once you quit the agent.
+ */
+export function shellLaunch(opts: {
+  shell: string;
+  command: string;
+  exec?: boolean;
+}): string {
+  const body = opts.exec === false ? opts.command : `exec ${opts.command}`;
+  return `${quoteArg(opts.shell)} -il -c ${quoteArg(body)}`;
+}
+
+/**
+ * Shown inside the pane instead of exec'ing a binary we know is broken, so the
+ * failure is readable in the tab rather than just "Pane is dead".
+ */
+export function agentErrorLaunch(opts: {
+  agentName: string;
+  message: string;
+  shell: string;
+}): string {
+  const body = [
+    `printf '%s\\n\\n' ${quoteArg(`${opts.agentName} pane: cannot start ${opts.agentName} — ${opts.message}`)}`,
+    `printf '%s\\n' 'Fix the binary, then reopen this session from the dashboard (no restart needed).'`,
+    `exec ${quoteArg(opts.shell)} -il`,
+  ].join("; ");
+  return `${quoteArg(opts.shell)} -c ${quoteArg(body)}`;
+}
+
+export interface ProbeResult {
+  ok: boolean;
+  version?: string;
+  problem?: string;
+}
+
+/**
+ * Run the agent once to prove it can execute at all. A static check (exists,
+ * non-empty, +x) says nothing about the file's contents — a truncated download
+ * or a wrong-architecture binary passes all three and still dies on launch.
+ */
+export async function probeVersion(opts: {
+  bin: string;
+  args?: string[];
+  env?: Record<string, string | undefined>;
+  timeoutMs?: number;
+}): Promise<ProbeResult> {
+  const args = opts.args ?? ["--version"];
+  let proc;
+  try {
+    proc = Bun.spawn([opts.bin, ...args], {
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, ...opts.env },
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      problem: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const timer = setTimeout(() => proc.kill(), opts.timeoutMs ?? 8000);
+  const [out, err] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const code = await proc.exited;
+  clearTimeout(timer);
+  if (code !== 0) {
+    const detail = (err || out).trim().split("\n")[0] ?? "";
+    return {
+      ok: false,
+      problem:
+        `${opts.bin} exited ${code} on ${args.join(" ")}` +
+        (detail ? `: ${detail}` : ""),
+    };
+  }
+  return { ok: true, version: out.trim().split("\n").pop()?.trim() };
 }

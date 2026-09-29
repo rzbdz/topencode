@@ -1,35 +1,23 @@
 import { Database } from "bun:sqlite";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { statSync, readdirSync, unlinkSync } from "node:fs";
-import { opencodeBin } from "./config.ts";
-import type { OpencodeSession } from "./types.ts";
-
-const DB_PATH =
-  process.env.OPENCODE_DB_PATH ??
-  join(homedir(), ".local", "share", "opencode", "opencode.db");
-
-export interface SessionCost {
-  sessionId: string;
-  messages: number;
-  parts: number;
-  events: number;
-  bytes: number;
-}
-
-export interface DeleteResult {
-  sessionId: string;
-  ok: boolean;
-  error?: string;
-}
+import { DB_PATH } from "./store.ts";
+import type { AgentSession } from "../../types.ts";
+import type {
+  CleanFilter,
+  DeleteResult,
+  OrphanFile,
+  SessionCost,
+} from "../../profile.ts";
 
 export async function deleteSession(
+  bin: string,
   sessionId: string,
   directory: string,
 ): Promise<DeleteResult> {
   let proc;
   try {
-    proc = Bun.spawn([opencodeBin(), "session", "delete", sessionId], {
+    proc = Bun.spawn([bin, "session", "delete", sessionId], {
       cwd: directory,
       stdout: "pipe",
       stderr: "pipe",
@@ -73,7 +61,9 @@ export function sessionStillExists(sessionId: string): boolean {
   }
 }
 
-export function measureSessions(sessionIds: string[]): Map<string, SessionCost> {
+export function measureSessions(
+  sessionIds: string[],
+): Map<string, SessionCost> {
   const out = new Map<string, SessionCost>();
   if (sessionIds.length === 0) return out;
   try {
@@ -92,8 +82,15 @@ export function measureSessions(sessionIds: string[]): Map<string, SessionCost> 
                                                                                   AS bytes
              FROM session s WHERE s.id IN (${ph})`,
         )
-        .all(...sessionIds) as SessionCost[];
-      for (const r of rows) out.set(r.sessionId, r);
+        .all(...sessionIds) as Array<SessionCost & { parts: number; events: number }>;
+      for (const r of rows) {
+        out.set(r.sessionId, {
+          sessionId: r.sessionId,
+          messages: r.messages,
+          bytes: r.bytes,
+          detail: `${r.parts} parts`,
+        });
+      }
     } finally {
       db.close();
     }
@@ -119,17 +116,11 @@ export function countChildren(sessionId: string): number {
   }
 }
 
-export interface CleanFilter {
-  olderThanDays?: number;
-  emptyOnly?: boolean;
-  directory?: string;
-}
-
 export function selectForCleanup(
-  sessions: OpencodeSession[],
+  sessions: AgentSession[],
   filter: CleanFilter,
   now = Date.now(),
-): OpencodeSession[] {
+): AgentSession[] {
   let pool = sessions;
   if (filter.directory) {
     pool = pool.filter((s) => s.directory === filter.directory);
@@ -139,8 +130,7 @@ export function selectForCleanup(
     pool = pool.filter((s) => s.updated < cutoff);
   }
   if (filter.emptyOnly) {
-    const ids = pool.map((s) => s.id);
-    const costs = measureSessions(ids);
+    const costs = measureSessions(pool.map((s) => s.id));
     pool = pool.filter((s) => (costs.get(s.id)?.messages ?? 0) === 0);
   }
   return pool;
@@ -154,16 +144,21 @@ export function dbSizeBytes(): number {
   }
 }
 
-export async function vacuum(): Promise<{ ok: boolean; error?: string }> {
+export async function vacuum(
+  bin: string,
+): Promise<{ ok: boolean; error?: string }> {
   let proc;
   try {
-    proc = Bun.spawn([opencodeBin(), "db", "VACUUM"], {
+    proc = Bun.spawn([bin, "db", "VACUUM"], {
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, OPENCODE_DISABLE_AUTOUPDATE: "1" },
     });
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
   const [out, err] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -183,12 +178,6 @@ const SESSION_KEYED_DIRS = [
   "directory-readme",
   "agent-usage-reminder",
 ];
-
-export interface OrphanFile {
-  path: string;
-  sessionId: string;
-  bytes: number;
-}
 
 export function findOrphanFiles(): OrphanFile[] {
   const out: OrphanFile[] = [];
@@ -238,11 +227,4 @@ export function removeOrphanFiles(files: OrphanFile[]): number {
     } catch {}
   }
   return n;
-}
-
-export function fmtBytes(n: number): string {
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(0)}K`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)}M`;
-  return `${(n / 1024 ** 3).toFixed(2)}G`;
 }

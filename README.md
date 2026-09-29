@@ -92,6 +92,7 @@ same reason inside the pane instead of exec'ing the bad binary.
 - **Stateless live/dormant model**: a live session is any tmux window in the `topencode` session tagged with `@oc_session`/`@oc_dir`. Dormant = `opencode session list` minus live. No separate state file — state dies with the tmux objects, so closed windows and server restarts self-heal.
 - **Idempotent opens** guarded by `tmux wait-for` locks: opening the same session twice selects the existing tab instead of duplicating.
 - **Auto-respawn**: the zsh pane is tagged `@oc_role=shell`; a `pane-died` hook respawns only shell panes (never opencode), preserving the split.
+- **Quitting opencode leaves a shell behind**: the opencode pane's command is `opencode … ; exec <shell> -il`, so Ctrl-C drops you into an interactive login shell in the same pane instead of leaving a dead one. Chained with `;` rather than `&&` because a signal-killed opencode exits non-zero — exactly when you want the shell. Running `exit` in that fallback shell does close the pane; reopen the tab from the dashboard.
 - All tmux options are set **on the topencode session only** — your global tmux config is untouched.
 
 ### Modules

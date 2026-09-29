@@ -296,8 +296,11 @@ async function focusOpencodePane(windowId: string): Promise<void> {
 }
 
 // Must be interactive+login: -l alone skips ~/.zshrc where proxy envs live.
-function shellLaunch(command: string): string {
-  const c = `-c ${quoteForTmux(`exec ${command}`)}`;
+// `exec: false` keeps this shell alive around `command` so a chained fallback
+// shell still runs afterwards.
+function shellLaunch(command: string, exec = true): string {
+  const body = exec ? `exec ${command}` : command;
+  const c = `-c ${quoteForTmux(body)}`;
   return `${quoteForTmux(SHELL_BIN)} -il ${c}`;
 }
 
@@ -313,6 +316,13 @@ function errorLaunch(message: string): string {
 }
 
 // Resolution is re-probed per open, so repairing opencode needs no restart.
+//
+// Quitting opencode (Ctrl-C) hands the pane to an interactive login shell
+// instead of ending the pane's process, so the tab stays usable for other
+// commands rather than going "Pane is dead". `;` rather than `&&`: opencode
+// killed by a signal exits non-zero, and that is exactly the case we want a
+// shell for. Pane-pid is unchanged by the final exec, so the window's tab
+// bookkeeping (@oc_session/@oc_dir) stays valid.
 function opencodeLaunch(directory: string, sessionArg: string): string {
   let bin: string;
   try {
@@ -321,7 +331,8 @@ function opencodeLaunch(directory: string, sessionArg: string): string {
     const message = err instanceof Error ? err.message : String(err);
     return errorLaunch(message);
   }
-  return shellLaunch(`${quoteForTmux(bin)} ${quoteForTmux(directory)}${sessionArg}`);
+  const run = `${quoteForTmux(bin)} ${quoteForTmux(directory)}${sessionArg}`;
+  return shellLaunch(`${run}; exec ${quoteForTmux(SHELL_BIN)} -il`, false);
 }
 
 export async function openSessionTab(

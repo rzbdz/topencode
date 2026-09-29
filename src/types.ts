@@ -1,4 +1,5 @@
-export interface OpencodeSession {
+/** A single agent conversation, as the product's store describes it. */
+export interface AgentSession {
   id: string;
   title: string;
   updated: number;
@@ -15,7 +16,7 @@ export interface LiveTab {
   active: boolean;
 }
 
-export interface SessionView extends OpencodeSession {
+export interface SessionView extends AgentSession {
   live: boolean;
   windowIndex?: number;
   windowId?: string;
@@ -31,7 +32,7 @@ export interface ProjectView {
 export type AttachContext =
   | { kind: "outside" }
   | { kind: "inside-other"; sessionName: string }
-  | { kind: "inside-topencode" };
+  | { kind: "inside-own" };
 
 export type StatusKind =
   | "working"

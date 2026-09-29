@@ -1,15 +1,38 @@
 import { basename } from "node:path";
 import type { LiveTab, AttachContext } from "./types.ts";
-import {
-  TMUX_SESSION,
-  opencodeBin,
-  SHELL_BIN,
-  SHELL_PANE_PERCENT,
-  HISTORY_LIMIT,
-  OPT,
-  ROLE,
-  dashboardCommand,
-} from "./config.ts";
+import { dashboardCommand } from "./config.ts";
+import { P } from "./profile.ts";
+
+/**
+ * Product constants, resolved lazily.
+ *
+ * The entry point selects a profile before any engine code runs, but a
+ * module-level `const` would be evaluated at import time — i.e. before that
+ * selection — so these are getters rather than values.
+ */
+const cfg = {
+  get session() {
+    return P().tmuxSession;
+  },
+  get opt() {
+    return P().opt;
+  },
+  get roles() {
+    return P().roles;
+  },
+  get shell() {
+    return P().shellBin;
+  },
+  get shellPercent() {
+    return P().shellPanePercent;
+  },
+  get historyLimit() {
+    return P().historyLimit;
+  },
+  get agentName() {
+    return P().agentName;
+  },
+};
 
 async function tmux(
   args: string[],
@@ -32,14 +55,14 @@ async function tmuxOk(args: string[]): Promise<boolean> {
 }
 
 export async function sessionExists(): Promise<boolean> {
-  return tmuxOk(["has-session", "-t", TMUX_SESSION]);
+  return tmuxOk(["has-session", "-t", cfg.session]);
 }
 
 export function resolveAttachContext(): AttachContext {
   const tmuxEnv = process.env.TMUX;
   if (!tmuxEnv) return { kind: "outside" };
-  const current = process.env.TOPENCODE_CURRENT_SESSION;
-  if (current === TMUX_SESSION) return { kind: "inside-topencode" };
+  const current = process.env[P().currentSessionEnv];
+  if (current === cfg.session) return { kind: "inside-own" };
   return { kind: "inside-other", sessionName: current ?? "" };
 }
 
@@ -51,9 +74,9 @@ async function currentClientSession(): Promise<string | null> {
 
 async function applySessionOptions(): Promise<void> {
   const set = (args: string[]) =>
-    tmux(["set-option", "-t", TMUX_SESSION, ...args]);
+    tmux(["set-option", "-t", cfg.session, ...args]);
   await set(["mouse", "on"]);
-  await set(["history-limit", String(HISTORY_LIMIT)]);
+  await set(["history-limit", String(cfg.historyLimit)]);
   await set(["base-index", "0"]);
   await set(["pane-base-index", "0"]);
   await set(["renumber-windows", "on"]);
@@ -69,7 +92,7 @@ async function applySessionOptions(): Promise<void> {
   await set(["pane-active-border-style", "fg=colour39"]);
   await set([
     "status-left",
-    "#[bg=colour39,fg=colour232,bold] ⌂ topencode #[bg=colour236,fg=colour39]#[default] ",
+    `#[bg=colour39,fg=colour232,bold] ⌂ ${P().name} #[bg=colour236,fg=colour39]#[default] `,
   ]);
   await set([
     "status-right",
@@ -80,17 +103,17 @@ async function applySessionOptions(): Promise<void> {
   await tmux([
     "set-hook",
     "-t",
-    TMUX_SESSION,
+    cfg.session,
     "pane-died",
-    `if -F "#{==:#{@oc_role},${ROLE.shell}}" "respawn-pane -k -c \\"#{pane_current_path}\\" ${SHELL_BIN}"`,
+    `if -F "#{==:#{${cfg.opt.role}},${cfg.roles.shell}}" "respawn-pane -k -c \\"#{pane_current_path}\\" ${cfg.shell}"`,
   ]);
   await tmux([
     "set-hook",
     "-a",
     "-t",
-    TMUX_SESSION,
+    cfg.session,
     "pane-died",
-    `if -F "#{==:#{@oc_role},${ROLE.dashboard}}" "respawn-pane -k ${dashboardCommand()}"`,
+    `if -F "#{==:#{${cfg.opt.role}},${cfg.roles.dashboard}}" "respawn-pane -k ${dashboardCommand()}"`,
   ]);
 
   await tmux([
@@ -99,13 +122,13 @@ async function applySessionOptions(): Promise<void> {
     "MouseDown2Status",
     "if",
     "-F",
-    "#{!=:#{@oc_session},}",
+    `#{!=:#{${cfg.opt.session}},}`,
     "kill-window -t=",
   ]);
 }
 
 export async function ensureSession(): Promise<void> {
-  const lock = "topencode-boot";
+  const lock = `${P().name}-boot`;
   await tmux(["wait-for", "-L", lock]);
   try {
     if (await sessionExists()) return;
@@ -114,7 +137,7 @@ export async function ensureSession(): Promise<void> {
       "new-session",
       "-d",
       "-s",
-      TMUX_SESSION,
+      cfg.session,
       "-n",
       "home",
       dashCmd,
@@ -124,11 +147,11 @@ export async function ensureSession(): Promise<void> {
       "set-option",
       "-pq",
       "-t",
-      `${TMUX_SESSION}:0.0`,
-      OPT.role,
-      ROLE.dashboard,
+      `${cfg.session}:0.0`,
+      cfg.opt.role,
+      cfg.roles.dashboard,
     ]);
-    await tmux(["set-option", "-w", "-t", `${TMUX_SESSION}:0`, "remain-on-exit", "on"]);
+    await tmux(["set-option", "-w", "-t", `${cfg.session}:0`, "remain-on-exit", "on"]);
   } finally {
     await tmux(["wait-for", "-U", lock]);
   }
@@ -143,11 +166,11 @@ export async function listTabs(): Promise<LiveTab[]> {
   const fmt = [
     "#{window_index}",
     "#{window_id}",
-    "#{@oc_session}",
-    "#{@oc_dir}",
+    `#{${cfg.opt.session}}`,
+    `#{${cfg.opt.dir}}`,
     "#{window_active}",
   ].join("\t");
-  const r = await tmux(["list-windows", "-t", TMUX_SESSION, "-F", fmt]);
+  const r = await tmux(["list-windows", "-t", cfg.session, "-F", fmt]);
   if (r.code !== 0) return [];
   return r.stdout
     .split("\n")
@@ -180,7 +203,7 @@ async function createTabWindow(
   const r = await tmux([
     "new-window",
     "-t",
-    TMUX_SESSION,
+    cfg.session,
     "-c",
     directory,
     "-P",
@@ -201,12 +224,12 @@ async function splitShell(windowId: string, directory: string): Promise<void> {
     "split-window",
     "-h",
     "-p",
-    String(SHELL_PANE_PERCENT),
+    String(cfg.shellPercent),
     "-t",
     windowTarget(windowId),
     "-c",
     directory,
-    SHELL_BIN,
+    cfg.shell,
   ]);
 }
 
@@ -220,7 +243,7 @@ async function tagWindow(
     "-wq",
     "-t",
     windowTarget(windowId),
-    OPT.session,
+    cfg.opt.session,
     sessionId,
   ]);
   await tmux([
@@ -228,7 +251,7 @@ async function tagWindow(
     "-wq",
     "-t",
     windowTarget(windowId),
-    OPT.dir,
+    cfg.opt.dir,
     directory,
   ]);
   await tmux([
@@ -260,7 +283,7 @@ async function setWindowTitle(windowId: string, title: string): Promise<void> {
     "-wq",
     "-t",
     windowTarget(windowId),
-    OPT.title,
+    cfg.opt.title,
     short,
   ]);
   await tmux([
@@ -286,8 +309,8 @@ async function tagPaneRoles(windowId: string): Promise<void> {
   for (const line of lines) {
     const [paneId, idx] = line.split("\t");
     if (!paneId) continue;
-    const role = idx === "0" ? ROLE.opencode : ROLE.shell;
-    await tmux(["set-option", "-pq", "-t", paneId, OPT.role, role]);
+    const role = idx === "0" ? cfg.roles.agent : cfg.roles.shell;
+    await tmux(["set-option", "-pq", "-t", paneId, cfg.opt.role, role]);
   }
 }
 
@@ -295,45 +318,9 @@ async function focusOpencodePane(windowId: string): Promise<void> {
   await tmux(["select-pane", "-t", `${windowTarget(windowId)}.0`]);
 }
 
-// Must be interactive+login: -l alone skips ~/.zshrc where proxy envs live.
-// `exec: false` keeps this shell alive around `command` so a chained fallback
-// shell still runs afterwards.
-function shellLaunch(command: string, exec = true): string {
-  const body = exec ? `exec ${command}` : command;
-  const c = `-c ${quoteForTmux(body)}`;
-  return `${quoteForTmux(SHELL_BIN)} -il ${c}`;
-}
-
-// Shown inside the pane instead of exec'ing a binary we know is broken, so the
-// failure is readable in the tab rather than just "Pane is dead".
-function errorLaunch(message: string): string {
-  const body = [
-    `printf '%s\\n\\n' ${quoteForTmux(`topencode: cannot start opencode — ${message}`)}`,
-    `printf '%s\\n' 'Fix the binary, then reopen this session from the dashboard (no restart needed).'`,
-    `exec ${quoteForTmux(SHELL_BIN)} -il`,
-  ].join("; ");
-  return `${quoteForTmux(SHELL_BIN)} -c ${quoteForTmux(body)}`;
-}
-
-// Resolution is re-probed per open, so repairing opencode needs no restart.
-//
-// Quitting opencode (Ctrl-C) hands the pane to an interactive login shell
-// instead of ending the pane's process, so the tab stays usable for other
-// commands rather than going "Pane is dead". `;` rather than `&&`: opencode
-// killed by a signal exits non-zero, and that is exactly the case we want a
-// shell for. Pane-pid is unchanged by the final exec, so the window's tab
-// bookkeeping (@oc_session/@oc_dir) stays valid.
-function opencodeLaunch(directory: string, sessionArg: string): string {
-  let bin: string;
-  try {
-    bin = opencodeBin();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return errorLaunch(message);
-  }
-  const run = `${quoteForTmux(bin)} ${quoteForTmux(directory)}${sessionArg}`;
-  return shellLaunch(`${run}; exec ${quoteForTmux(SHELL_BIN)} -il`, false);
-}
+// How the agent pane is launched — its argv, its session flag, and the shell
+// left behind when the agent exits — is the product's business. See
+// `Profile.launch` in profile.ts.
 
 export async function openSessionTab(
   sessionId: string,
@@ -341,7 +328,7 @@ export async function openSessionTab(
   title?: string,
 ): Promise<void> {
   await ensureSession();
-  const lock = "topencode-open";
+  const lock = `${P().name}-open`;
   await tmux(["wait-for", "-L", lock]);
   try {
     const existing = await findWindowBySession(sessionId);
@@ -349,7 +336,7 @@ export async function openSessionTab(
       await selectWindow(existing.windowId);
       return;
     }
-    const launch = opencodeLaunch(directory, ` -s ${quoteForTmux(sessionId)}`);
+    const launch = P().launch(directory, sessionId);
     const windowId = await createTabWindow(directory, launch);
     await tagWindow(windowId, sessionId, directory);
     if (title) await setWindowTitle(windowId, title);
@@ -364,17 +351,17 @@ export async function openSessionTab(
 
 export async function newSessionTab(directory: string): Promise<void> {
   await ensureSession();
-  const lock = "topencode-open";
+  const lock = `${P().name}-open`;
   await tmux(["wait-for", "-L", lock]);
   try {
-    const launch = opencodeLaunch(directory, "");
+    const launch = P().launch(directory);
     const windowId = await createTabWindow(directory, launch);
     await tmux([
       "set-option",
       "-wq",
       "-t",
       windowTarget(windowId),
-      OPT.dir,
+      cfg.opt.dir,
       directory,
     ]);
     await tmux([
@@ -397,16 +384,16 @@ export async function newSessionTab(directory: string): Promise<void> {
 
 export async function newBlankTab(directory: string): Promise<void> {
   await ensureSession();
-  const lock = "topencode-open";
+  const lock = `${P().name}-open`;
   await tmux(["wait-for", "-L", lock]);
   try {
-    const windowId = await createTabWindow(directory, SHELL_BIN);
+    const windowId = await createTabWindow(directory, cfg.shell);
     await tmux([
       "set-option",
       "-wq",
       "-t",
       windowTarget(windowId),
-      OPT.dir,
+      cfg.opt.dir,
       directory,
     ]);
     await tmux([
@@ -434,9 +421,9 @@ export async function sniffPaneSessions(): Promise<
     "list-panes",
     "-s",
     "-t",
-    TMUX_SESSION,
+    cfg.session,
     "-F",
-    "#{window_id}\t#{window_index}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{@oc_role}",
+    `#{window_id}\t#{window_index}\t#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{${cfg.opt.role}}`,
   ]);
   if (r.code !== 0) return [];
   const out: Array<{
@@ -447,7 +434,7 @@ export async function sniffPaneSessions(): Promise<
   }> = [];
   for (const line of r.stdout.split("\n").filter((l) => l.length > 0)) {
     const [windowId, windowIndex, , panePid, cwd, role] = line.split("\t");
-    if (role === ROLE.shell) continue;
+    if (role === cfg.roles.shell) continue;
     if (!panePid) continue;
     const sessionId = await sniffSessionIdFromPid(Number(panePid));
     out.push({
@@ -470,11 +457,8 @@ async function sniffSessionIdFromPid(pid: number): Promise<string | undefined> {
       continue;
     }
     const parts = cmdline.split("\0").filter((s) => s.length > 0);
-    if (!parts.some((s) => s.includes("opencode"))) continue;
-    const i = parts.findIndex((s) => s === "-s" || s === "--session");
-    if (i >= 0 && parts[i + 1]?.startsWith("ses_")) return parts[i + 1];
-    const inline = parts.find((s) => s.startsWith("ses_"));
-    if (inline) return inline;
+    const hit = P().sniffSessionId(parts);
+    if (hit) return hit;
   }
   return undefined;
 }
@@ -515,11 +499,11 @@ export async function closeTab(ref: string): Promise<boolean> {
 }
 
 export async function killSession(): Promise<void> {
-  await tmux(["kill-session", "-t", TMUX_SESSION]);
+  await tmux(["kill-session", "-t", cfg.session]);
 }
 
 export async function detachClient(): Promise<void> {
-  await tmux(["detach-client", "-s", TMUX_SESSION]);
+  await tmux(["detach-client", "-s", cfg.session]);
 }
 
 export async function claimUntaggedTabs(
@@ -544,7 +528,7 @@ export async function claimUntaggedTabs(
       "-wq",
       "-t",
       windowTarget(t.windowId),
-      OPT.session,
+      cfg.opt.session,
       hit.id,
     ]);
     await setWindowTitle(t.windowId, hit.title);
@@ -563,7 +547,7 @@ export async function claimUntaggedTabs(
         "#{window_name}",
       ]);
       const name = cur.stdout.trim();
-      if (name !== "opencode" && name !== "zsh" && name !== "bash") continue;
+      if (name !== cfg.agentName && name !== "zsh" && name !== "bash") continue;
       const title = await titleOf(t.sessionId);
       if (title) await setWindowTitle_safe(t.windowId, title);
     }
@@ -592,7 +576,7 @@ export async function adoptRuntimeSessions(
       "-wq",
       "-t",
       windowTarget(s.windowId),
-      OPT.session,
+      cfg.opt.session,
       s.sessionId,
     ]);
     if (s.cwd) {
@@ -601,7 +585,7 @@ export async function adoptRuntimeSessions(
         "-wq",
         "-t",
         windowTarget(s.windowId),
-        OPT.dir,
+        cfg.opt.dir,
         s.cwd,
       ]);
     }
@@ -628,7 +612,7 @@ export async function applyWindowFormats(): Promise<void> {
   const r = await tmux([
     "list-windows",
     "-t",
-    TMUX_SESSION,
+    cfg.session,
     "-F",
     "#{window_id}",
   ]);
@@ -664,12 +648,12 @@ export async function reapplyConfig(): Promise<void> {
 export async function attach(): Promise<void> {
   await reapplyConfig();
   const ctx = resolveAttachContext();
-  if (ctx.kind === "inside-topencode") {
+  if (ctx.kind === "inside-own") {
     await selectWindow("home");
     return;
   }
   if (ctx.kind === "inside-other") {
-    const proc = Bun.spawn(["tmux", "switch-client", "-t", TMUX_SESSION], {
+    const proc = Bun.spawn(["tmux", "switch-client", "-t", cfg.session], {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -677,14 +661,10 @@ export async function attach(): Promise<void> {
     await proc.exited;
     return;
   }
-  const proc = Bun.spawn(["tmux", "attach-session", "-t", TMUX_SESSION], {
+  const proc = Bun.spawn(["tmux", "attach-session", "-t", cfg.session], {
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
   });
   await proc.exited;
-}
-
-function quoteForTmux(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
 }

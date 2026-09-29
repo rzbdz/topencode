@@ -146,23 +146,36 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   // right-aligned strip sits an unreadable distance from the title — while the
   // block width is capped so the buttons stay in one column across rows.
   const ROW_MAX_W = 72;
+  const TITLE_MIN_W = 12;
+  const TITLE_MAX_W = 48;
   const AGE_W = 5;
   const BTN_SLOTS = 3;
   const BTN_STRIDE = 2;
   const BTN_W = BTN_SLOTS * BTN_STRIDE;
 
+  /**
+   * Title column width for the current frame, set by the renderer from the
+   * longest title actually on screen and read back by the hit test. Sizing it
+   * to the content instead of to the terminal is what keeps the buttons beside
+   * the text on a wide pane; sharing one width across rows is what keeps them
+   * in a single column.
+   */
+  let frameTitleW = TITLE_MIN_W;
+
   /** Row geometry, shared by the renderer and the hit test. */
   function rowGeom() {
     const rowX0 = rightRegion.x0;
     const contentW = Math.min(cols - rowX0 + 1, ROW_MAX_W);
-    const bodyW = Math.max(12, contentW - BTN_W);
+    const titleW = Math.max(
+      TITLE_MIN_W,
+      Math.min(frameTitleW, contentW - BTN_W - 9),
+    );
     // " ● " + title + " " + age
-    const titleW = Math.max(6, bodyW - 9);
     return {
       rowX0,
       contentW,
-      bodyW,
       titleW,
+      bodyW: titleW + 9,
       btnX0: rowX0 + 3 + titleW + 1 + AGE_W + 1,
     };
   }
@@ -344,6 +357,21 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
     const rrows = rightRows();
     const rightVisible = rightRegion.y1 - rightRegion.y0 + 1;
+    frameTitleW = Math.min(
+      TITLE_MAX_W,
+      Math.max(
+        TITLE_MIN_W,
+        ...rrows.map((r) =>
+          stringWidth(
+            r.kind === "session" || r.kind === "binned"
+              ? r.kind === "session"
+                ? r.s.title || "(untitled)"
+                : r.e.title || "(untitled)"
+              : "",
+          ),
+        ),
+      ),
+    );
     if (!proj && !inBin) {
       lines.push(
         `${ESC}[${rightRegion.y0};${rightRegion.x0}H${ESC}[2mSelect a project ←${ESC}[0m`,

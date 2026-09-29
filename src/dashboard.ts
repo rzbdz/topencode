@@ -141,11 +141,37 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   const rowHits = new Map<number, RowHits>();
   let health: HealthReport | null = null;
 
-  // Row buttons live in a right-aligned strip: [♻/↩] [✗] [✕].
+  // A row is a fixed-width block: " ● title…  age  [♻] [✗] [✕]". The strip
+  // follows the text instead of the screen edge — on a wide terminal a
+  // right-aligned strip sits an unreadable distance from the title — while the
+  // block width is capped so the buttons stay in one column across rows.
+  const ROW_MAX_W = 72;
+  const AGE_W = 5;
   const BTN_SLOTS = 3;
   const BTN_STRIDE = 2;
   const BTN_W = BTN_SLOTS * BTN_STRIDE;
-  const slotX = (slot: number) => cols - 1 - (BTN_SLOTS - 1 - slot) * BTN_STRIDE;
+
+  /** Row geometry, shared by the renderer and the hit test. */
+  function rowGeom() {
+    const rowX0 = rightRegion.x0;
+    const contentW = Math.min(cols - rowX0 + 1, ROW_MAX_W);
+    const bodyW = Math.max(12, contentW - BTN_W);
+    // " ● " + title + " " + age
+    const titleW = Math.max(6, bodyW - 9);
+    return {
+      rowX0,
+      contentW,
+      bodyW,
+      titleW,
+      btnX0: rowX0 + 3 + titleW + 1 + AGE_W + 1,
+    };
+  }
+  const slotX = (slot: number) => rowGeom().btnX0 + slot * BTN_STRIDE;
+  /** Buttons are one column wide with a gap: accept the column after them too. */
+  const onSlot = (x: number, slot: number) => {
+    const at = slotX(slot);
+    return x === at || x === at + 1;
+  };
   /** The red ✗, brightened while it is armed for a confirming second click. */
   const purgeMark = (armed: boolean) =>
     armed
@@ -318,7 +344,6 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
     const rrows = rightRows();
     const rightVisible = rightRegion.y1 - rightRegion.y0 + 1;
-    const rightW = cols - rightRegion.x0 + 1;
     if (!proj && !inBin) {
       lines.push(
         `${ESC}[${rightRegion.y0};${rightRegion.x0}H${ESC}[2mSelect a project ←${ESC}[0m`,
@@ -333,14 +358,14 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
         const selOn = isSel ? `${ESC}[48;5;39m${ESC}[38;5;232m` : "";
         const selOff = isSel ? `${ESC}[0m` : "";
         if (row.kind === "new") {
-          const txt = padEnd(" ＋ New session", rightW);
+          const txt = padEnd(" ＋ New session", rowGeom().contentW);
           lines.push(
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;36m`}${txt}${ESC}[0m`,
           );
         } else if (row.kind === "blank") {
           const txt = padEnd(
             ` ▫ Blank tab (shell ⇢ start ${P().agentName} yourself)`,
-            rightW,
+            rowGeom().contentW,
           );
           lines.push(
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;245m`}${txt}${ESC}[0m`,
@@ -348,39 +373,37 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
         } else if (row.kind === "binned") {
           // Bin rows carry only the two buttons: restore, and delete for good.
           const e = row.e;
-          const rt = relTime(e.hiddenAt);
-          const titleW = Math.max(4, rightW - 4 - rt.length - BTN_W);
-          const t = truncate(e.title || "(untitled)", titleW);
+          const g = rowGeom();
+          const rt = relTime(e.hiddenAt).padStart(AGE_W);
+          const t = truncate(e.title || "(untitled)", g.titleW);
           if (isSel) {
-            const body = padEnd(
-              ` ♻ ${padEnd(t, titleW)} ${rt}`,
-              rightW - BTN_W,
+            lines.push(
+              `${ESC}[${y};${g.rowX0}H${selOn}${padEnd(` ♻ ${padEnd(t, g.titleW)} ${rt}`, g.bodyW)}${selOff}`,
             );
-            lines.push(`${ESC}[${y};${rightRegion.x0}H${selOn}${body}${selOff}`);
           } else {
-            const body = ` ${ESC}[38;5;208m♻${ESC}[0m ${padEnd(t, titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`;
-            lines.push(`${ESC}[${y};${rightRegion.x0}H${body}`);
+            lines.push(
+              `${ESC}[${y};${g.rowX0}H ${ESC}[38;5;208m♻${ESC}[0m ${padEnd(t, g.titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`,
+            );
           }
           rowHits.set(y, { restore: e, purgeBin: e });
           lines.push(`${ESC}[${y};${slotX(0)}H${ESC}[38;5;42m↩${ESC}[0m`);
           lines.push(`${ESC}[${y};${slotX(1)}H${purgeMark(confirmPurge === e.id)}`);
         } else {
           const s = row.s;
-          const rt = relTime(s.updated);
-          const titleW = Math.max(4, rightW - 4 - rt.length - BTN_W);
-          const t = truncate(s.title || "(untitled)", titleW);
+          const g = rowGeom();
+          const rt = relTime(s.updated).padStart(AGE_W);
+          const t = padEnd(truncate(s.title || "(untitled)", g.titleW), g.titleW);
           if (isSel) {
-            const body = padEnd(
-              ` ${s.live ? "●" : "○"} ${padEnd(t, titleW)} ${rt}`,
-              rightW - BTN_W,
+            lines.push(
+              `${ESC}[${y};${g.rowX0}H${selOn}${padEnd(` ${s.live ? "●" : "○"} ${t} ${rt}`, g.bodyW)}${selOff}`,
             );
-            lines.push(`${ESC}[${y};${rightRegion.x0}H${selOn}${body}${selOff}`);
           } else {
             const dot = s.live
               ? `${ESC}[38;5;42m●${ESC}[0m`
               : `${ESC}[38;5;244m○${ESC}[0m`;
-            const body = ` ${dot} ${padEnd(t, titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`;
-            lines.push(`${ESC}[${y};${rightRegion.x0}H${body}`);
+            lines.push(
+              `${ESC}[${y};${g.rowX0}H ${dot} ${t} ${ESC}[38;5;244m${rt}${ESC}[0m`,
+            );
           }
           rowHits.set(y, {
             recycle: s,
@@ -467,11 +490,11 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     }
     const hits = rowHits.get(y);
     if (hits) {
-      if ((x === slotX(2) || x === cols) && hits.close) {
+      if (onSlot(x, 2) && hits.close) {
         void actions.closeSession(hits.close).then(refresh).catch(() => {});
         return;
       }
-      if (x === slotX(1)) {
+      if (onSlot(x, 1)) {
         if (hits.purgeBin) {
           if (confirmPurge === hits.purgeBin.id) {
             confirmPurge = null;
@@ -491,7 +514,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
           return;
         }
       }
-      if (x === slotX(0)) {
+      if (onSlot(x, 0)) {
         if (hits.restore) {
           void actions.restore(hits.restore).then(refresh).catch(() => {});
           return;

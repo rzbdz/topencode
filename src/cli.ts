@@ -1,6 +1,11 @@
 import { runDashboard, type DashboardActions } from "./dashboard.ts";
 import { buildProjectViews } from "./views.ts";
-import type { LiveTab, SessionStatusView, SessionView } from "./types.ts";
+import type {
+  BinEntry,
+  LiveTab,
+  SessionStatusView,
+  SessionView,
+} from "./types.ts";
 import {
   ensureSession,
   attach,
@@ -18,14 +23,64 @@ import {
 } from "./tmux.ts";
 import { buildStatusViews, LAMP, DESC } from "./status.ts";
 import { fmtAge, fmtBytes, padW, strWidth, truncW } from "./format.ts";
+import { addToBin, hiddenIds, isHidden, loadBin, removeFromBin } from "./mask.ts";
 import { resolve } from "node:path";
 import { P } from "./profile.ts";
 
-async function cmdList(): Promise<void> {
+/**
+ * The two delete strategies, in one place.
+ *
+ * Recycle writes one id to our own bin and touches nothing the agent owns, so
+ * it is instant, reversible, and identical for both products. Purge goes
+ * through the product's delete instead — opencode removes its own database
+ * rows, Claude Code's transcript files are removed — because the agent owns
+ * those invariants and we must not reimplement them.
+ */
+async function closeTabForSession(sessionId: string): Promise<void> {
+  const tabs = await listTabs();
+  if (tabs.some((t) => t.sessionId === sessionId)) await closeTab(sessionId);
+}
+
+async function recycleSession(s: {
+  id: string;
+  title: string;
+  directory: string;
+}): Promise<void> {
+  // A recycled session should stop occupying a tab too, or the listing and the
+  // tab bar would disagree about whether it is still around.
+  await closeTabForSession(s.id);
+  addToBin({
+    id: s.id,
+    title: s.title,
+    directory: s.directory,
+    hiddenAt: Date.now(),
+  });
+}
+
+async function purgeSession(s: {
+  id: string;
+  title: string;
+  directory: string;
+}): Promise<void> {
+  await closeTabForSession(s.id);
+  removeFromBin([s.id]);
+  await P().cleanup.delete(s.id, s.directory);
+}
+
+async function cmdList(showAll = false): Promise<void> {
   const [sessions, tabs] = await Promise.all([P().sessions.list(), listTabs()]);
-  const projects = buildProjectViews(sessions, tabs);
+  const hidden = hiddenIds();
+  const projects = buildProjectViews(
+    sessions,
+    tabs,
+    showAll ? new Set() : hidden,
+  );
   if (projects.length === 0) {
-    console.log(`No ${P().agentName} sessions found.`);
+    const recycled =
+      !showAll && hidden.size > 0
+        ? ` ${hidden.size} more are in the recycle bin (\`${P().name} bin\`, or --all).`
+        : "";
+    console.log(`No ${P().agentName} sessions found.${recycled}`);
     return;
   }
   for (const p of projects) {
@@ -33,8 +88,10 @@ async function cmdList(): Promise<void> {
     for (const s of p.sessions) {
       const mark = s.live ? "\x1b[32m●\x1b[0m" : "\x1b[2m○\x1b[0m";
       const idx = s.live ? ` \x1b[2m[tab ${s.windowIndex}]\x1b[0m` : "";
+      const recycled =
+        showAll && hidden.has(s.id) ? " \x1b[38;5;208m[recycled]\x1b[0m" : "";
       console.log(
-        `  ${mark} ${s.title || "(untitled)"}  \x1b[2m${s.id}\x1b[0m${idx}`,
+        `  ${mark} ${s.title || "(untitled)"}  \x1b[2m${s.id}\x1b[0m${idx}${recycled}`,
       );
     }
   }
@@ -110,6 +167,13 @@ async function cmdOpen(sessionId: string): Promise<void> {
     console.error(`Session not found: ${sessionId}`);
     process.exit(1);
   }
+  // Opening a recycled session is an explicit request to use it again.
+  if (isHidden(sessionId)) {
+    removeFromBin([sessionId]);
+    console.log(
+      `\x1b[32m↩\x1b[0m ${sessionId} was in the recycle bin — restored it.`,
+    );
+  }
   const selected = await selectSessionWindow(sessionId);
   if (!selected) await openSessionTab(sessionId, s.directory, s.title);
   await attach();
@@ -129,6 +193,59 @@ async function confirmPrompt(question: string): Promise<boolean> {
     return ans === "y" || ans === "yes";
   }
   return false;
+}
+
+async function cmdHide(ids: string[]): Promise<void> {
+  const sessions = await P().sessions.list();
+  let done = 0;
+  for (const id of ids) {
+    const s = sessions.find((x) => x.id === id);
+    if (!s) {
+      console.error(`\x1b[33mnot found:\x1b[0m ${id}`);
+      continue;
+    }
+    await recycleSession(s);
+    console.log(
+      `  \x1b[38;5;208m♻\x1b[0m recycled ${id}  \x1b[2m${s.title || "(untitled)"}\x1b[0m`,
+    );
+    done++;
+  }
+  if (done > 0) {
+    console.log(
+      `\n${done} session(s) recycled — nothing was deleted. \`${P().name} bin\` lists them, \`${P().name} unhide <id>\` restores.`,
+    );
+  }
+}
+
+async function cmdUnhide(ids: string[]): Promise<void> {
+  const known = new Set(loadBin().map((e) => e.id));
+  const hit = ids.filter((id) => known.has(id));
+  for (const id of ids.filter((id) => !known.has(id))) {
+    console.error(`\x1b[33mnot in the bin:\x1b[0m ${id}`);
+  }
+  if (hit.length === 0) return;
+  removeFromBin(hit);
+  for (const id of hit) console.log(`  \x1b[32m↩\x1b[0m restored ${id}`);
+}
+
+async function cmdBin(): Promise<void> {
+  const entries = loadBin().sort((a, b) => b.hiddenAt - a.hiddenAt);
+  if (entries.length === 0) {
+    console.log("Recycle bin is empty.");
+    return;
+  }
+  const present = new Set((await P().sessions.list()).map((s) => s.id));
+  console.log(
+    `\x1b[1m♻ recycle bin\x1b[0m — ${entries.length} session(s)\n\x1b[2m  ↩ restore: ${P().name} unhide <id>   ✗ delete for good: ${P().name} delete <id>\x1b[0m`,
+  );
+  for (const e of entries) {
+    const missing = present.has(e.id)
+      ? ""
+      : " \x1b[31m[session gone — only this bin entry remains]\x1b[0m";
+    console.log(
+      `  \x1b[38;5;208m♻\x1b[0m ${e.title || "(untitled)"}  \x1b[2m${e.id}\x1b[0m  \x1b[2m${fmtAge(Date.now() - e.hiddenAt)} ago · ${e.directory}\x1b[0m${missing}`,
+    );
+  }
 }
 
 /** A negative count means "too big to count cheaply", never "none". */
@@ -183,11 +300,13 @@ async function cmdDelete(ids: string[], force: boolean): Promise<void> {
   }
 
   let done = 0;
+  const removed: string[] = [];
   for (const s of targets) {
     if (liveIds.has(s.id)) await closeTab(s.id);
     const r = await P().cleanup.delete(s.id, s.directory);
     if (r.ok && !P().cleanup.stillExists(s.id)) {
       console.log(`  \x1b[32m✓\x1b[0m deleted ${s.id}`);
+      removed.push(s.id);
       done++;
     } else {
       console.error(
@@ -195,6 +314,8 @@ async function cmdDelete(ids: string[], force: boolean): Promise<void> {
       );
     }
   }
+  // A deleted session must not linger as a ghost in the recycle bin.
+  if (removed.length > 0) removeFromBin(removed);
   const orphans = P().cleanup.findOrphans();
   if (orphans.length > 0) {
     const bytes = orphans.reduce((a, o) => a + o.bytes, 0);
@@ -302,13 +423,17 @@ Examples:
   }
 
   let done = 0;
+  const removed: string[] = [];
   for (const s of picked) {
     if (liveIds.has(s.id)) await closeTab(s.id);
     const r = await P().cleanup.delete(s.id, s.directory);
-    if (r.ok && !P().cleanup.stillExists(s.id)) done++;
-    else console.error(`  \x1b[31m✗\x1b[0m ${s.id}: ${r.error ?? "still present"}`);
+    if (r.ok && !P().cleanup.stillExists(s.id)) {
+      done++;
+      removed.push(s.id);
+    } else console.error(`  \x1b[31m✗\x1b[0m ${s.id}: ${r.error ?? "still present"}`);
     process.stdout.write(`\r  deleted ${done}/${picked.length}...`);
   }
+  if (removed.length > 0) removeFromBin(removed);
   const orphans = P().cleanup.findOrphans();
   if (orphans.length > 0) {
     const bytes = orphans.reduce((a, o) => a + o.bytes, 0);
@@ -360,7 +485,7 @@ function makeActions(): DashboardActions {
     loadProjects: async () => {
       const tabs = await refreshTabs();
       const sessions = await P().sessions.list();
-      return buildProjectViews(sessions, tabs);
+      return buildProjectViews(sessions, tabs, hiddenIds());
     },
     openSession: async (s: SessionView) => {
       if (s.live) {
@@ -385,6 +510,20 @@ function makeActions(): DashboardActions {
       await newBlankTab(directory);
     },
     checkHealth: async () => P().health(),
+    loadBin: async () => loadBin().sort((a, b) => b.hiddenAt - a.hiddenAt),
+    recycle: async (s: SessionView) => {
+      await recycleSession(s);
+    },
+    purge: async (s: SessionView) => {
+      await purgeSession(s);
+    },
+    restore: async (e: BinEntry) => {
+      removeFromBin([e.id]);
+    },
+    purgeFromBin: async (e: BinEntry) => {
+      removeFromBin([e.id]);
+      await P().cleanup.delete(e.id, e.directory);
+    },
   };
 }
 
@@ -400,15 +539,18 @@ function usage(): void {
 Usage:
   ${p}                 attach (create the session if needed)
   ${p} attach          same as above
-  ${p} list            list all sessions grouped by project
+  ${p} list [--all]    list sessions grouped by project (--all shows recycled)
   ${p} status          show status of every open session tab
   ${p} watch           live-refreshing status view
-  ${p} open <id>       open/select a tab for session id
+  ${p} open <id>       open/select a tab for session id (restores if recycled)
   ${p} new [dir]       start a new ${P().agentName} session tab (default: cwd)
   ${p} close <tab|id>  close a tab (does not delete the session)
+  ${p} hide <id...>    recycle session(s): hidden from listings, reversible
+  ${p} unhide <id...>  take session(s) back out of the recycle bin
+  ${p} bin             list the recycle bin
   ${p} delete <id...>  permanently delete session(s) and all their data
   ${p} clean [filters] bulk cleanup (dry run by default)
-  ${p} vacuum          reclaim disk space after deleting
+  ${p} vacuum          sweep leftovers / reclaim disk space
   ${p} kill            kill the whole ${p} tmux session
 `);
 }
@@ -424,7 +566,7 @@ export async function main(): Promise<void> {
       await runDashboard(makeActions());
       break;
     case "list":
-      await cmdList();
+      await cmdList(rest.includes("--all"));
       break;
     case "status":
       await cmdStatus();
@@ -442,6 +584,22 @@ export async function main(): Promise<void> {
     case "close":
       if (!rest[0]) return usage();
       await cmdClose(rest[0]);
+      break;
+    case "hide": {
+      const ids = rest.filter((a) => !a.startsWith("-"));
+      if (ids.length === 0) return usage();
+      await cmdHide(ids);
+      break;
+    }
+    case "unhide":
+    case "restore": {
+      const ids = rest.filter((a) => !a.startsWith("-"));
+      if (ids.length === 0) return usage();
+      await cmdUnhide(ids);
+      break;
+    }
+    case "bin":
+      await cmdBin();
       break;
     case "delete":
     case "rm": {

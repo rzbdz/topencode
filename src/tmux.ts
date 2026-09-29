@@ -483,15 +483,18 @@ export async function selectSessionWindow(sessionId: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Resolve a ref the way the CLI and the recycle bin hand them over: either a
+ * session id from any product (`ses_…` for opencode, a UUID for Claude Code) or
+ * a tab number. Matching on the `ses_` prefix alone silently missed every
+ * Claude Code session, which left its tab open when the session was deleted.
+ */
 export async function closeTab(ref: string): Promise<boolean> {
   const tabs = await listTabs();
-  let target: LiveTab | undefined;
-  if (ref.startsWith("ses_")) {
-    target = tabs.find((t) => t.sessionId === ref);
-  } else {
-    const idx = Number(ref);
-    if (!Number.isNaN(idx)) target = tabs.find((t) => t.windowIndex === idx);
-  }
+  const byIndex = /^\d+$/.test(ref)
+    ? tabs.find((t) => t.windowIndex === Number(ref))
+    : undefined;
+  const target = byIndex ?? tabs.find((t) => t.sessionId === ref);
   if (!target) return false;
   if (target.windowIndex === 0) return false;
   await tmux(["kill-window", "-t", windowTarget(target.windowId)]);

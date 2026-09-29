@@ -16,6 +16,20 @@ export interface LiveTab {
   active: boolean;
 }
 
+/**
+ * A session parked in the recycle bin.
+ *
+ * The bin keeps its own copy of the title and directory so the bin view still
+ * renders after the underlying session has been deleted outside the tool.
+ */
+export interface BinEntry {
+  id: string;
+  title: string;
+  directory: string;
+  /** When it was recycled (epoch ms). */
+  hiddenAt: number;
+}
+
 export interface SessionView extends AgentSession {
   live: boolean;
   windowIndex?: number;

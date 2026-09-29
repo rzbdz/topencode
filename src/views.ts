@@ -38,6 +38,7 @@ function dedupeLabels(dirs: string[]): Map<string, string> {
 export function buildProjectViews(
   sessions: AgentSession[],
   tabs: LiveTab[],
+  hidden: Set<string> = new Set(),
 ): ProjectView[] {
   const liveBySession = new Map<
     string,
@@ -53,6 +54,10 @@ export function buildProjectViews(
 
   const byDir = new Map<string, SessionView[]>();
   for (const s of sessions) {
+    // Recycled sessions are filtered here rather than inside the product's
+    // store: hiding is our own concept, and the store must keep reporting every
+    // session it has so the recycle bin and `list --all` can still see them.
+    if (hidden.has(s.id)) continue;
     const hit = liveBySession.get(s.id);
     const view: SessionView = {
       ...s,

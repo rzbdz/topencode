@@ -78,6 +78,40 @@ inode, so the running process keeps working and the next pane picks up the new b
 - **Attach from inside another tmux** → `switch-client` (no nested tmux trap).
 - Clicking a session in the dashboard: if it's already live, jumps to its tab; if dormant, opens a new tab and launches the agent on it.
 
+## Deleting sessions
+
+Two strategies, deliberately different in what they touch:
+
+| | ♻ recycle (orange) | ✗ delete for good (red) |
+|---|---|---|
+| what it does | writes the session id to our own bin | asks the agent to delete the session |
+| touches agent data | no | yes, through the product's own delete |
+| reversible | yes (`unhide`) | no |
+| lives in | `~/.local/state/<product>/hidden.json` | the agent's own store |
+
+**Whether to delegate is the decision that matters: recycling never does, deleting for good always does.** opencode owns its database invariants — its `session delete` removes the rows, parts and events together — and Claude Code owns its files (the transcript, the sibling `<uuid>/` tool-output directory, and the session-keyed `file-history/<uuid>` and `session-env/<uuid>` directories). Hand-rolling either is how a store gets corrupted, so the only permanent delete path is the agent's own.
+
+Recycling is the opposite: one id in a local JSON file, nothing the agent owns is touched, identical for both products, and instant even for a session with a 10MB transcript.
+
+In the dashboard:
+
+- Every session row carries **♻** recycle and **✗** delete-for-good; a live row also keeps **✕** close-the-tab.
+- **✗ arms on the first click and acts on the second** — the hint line becomes "⚠ click ✗ again to delete for good" — because it is the one irreversible thing in the UI.
+- Recycling a live session also closes its tab, so the listing and the tab bar never disagree about whether it is around.
+- When the bin is non-empty it appears at the bottom of the project column as **♻ recycle bin (N)**; its rows carry **↩** restore and **✗** delete-for-good.
+
+From the CLI:
+
+```sh
+<cmd> hide <id...>    # recycle: out of the listings, nothing deleted
+<cmd> bin             # what is in the bin
+<cmd> unhide <id...>  # put it back
+<cmd> list --all      # include recycled sessions, marked [recycled]
+<cmd> delete <id...>  # delete for good (same as the red button)
+```
+
+The bin is per product, survives restarts, and `vacuum` never touches it — empty it only by purging or restoring. `open <id>` on a recycled session restores it, on the grounds that opening it is a decision to use it again.
+
 ## Scrolling
 
 - The **agent pane** enables its own mouse tracking (SGR), so the wheel scrolls the agent's view natively — no tmux copy-mode friction.

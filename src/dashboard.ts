@@ -1,4 +1,4 @@
-import type { ProjectView, SessionView } from "./types.ts";
+import type { BinEntry, ProjectView, SessionView } from "./types.ts";
 import { P } from "./profile.ts";
 
 export interface HealthReport {
@@ -18,6 +18,16 @@ export interface DashboardActions {
   blankTab(directory: string): Promise<void>;
   /** Optional probe of the agent binary; a failure is surfaced on the bottom row. */
   checkHealth?(): Promise<HealthReport>;
+  /** The recycle bin's contents, newest first. */
+  loadBin(): Promise<BinEntry[]>;
+  /** Move a session to the recycle bin. Reversible; touches no agent data. */
+  recycle(session: SessionView): Promise<void>;
+  /** Delete a session for good, through the product's own delete. */
+  purge(session: SessionView): Promise<void>;
+  /** Take a session back out of the bin. */
+  restore(entry: BinEntry): Promise<void>;
+  /** Delete a binned session for good. */
+  purgeFromBin(entry: BinEntry): Promise<void>;
 }
 
 const ESC = "\x1b";
@@ -93,6 +103,16 @@ interface Region {
   y1: number;
 }
 
+/** Click targets drawn on the row at a given y, rebuilt on every render. */
+interface RowHits {
+  /** windowId of a live tab, for its close button. */
+  close?: string;
+  recycle?: SessionView;
+  purge?: SessionView;
+  restore?: BinEntry;
+  purgeBin?: BinEntry;
+}
+
 export async function runDashboard(actions: DashboardActions): Promise<void> {
   const out = process.stdout;
   const inp = process.stdin;
@@ -112,8 +132,25 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   let detachRegion = { x0: 0, x1: 0, y: 0 };
   let exitRegion = { x0: 0, x1: 0, y: 0 };
   let confirmExit = false;
-  const closeHits = new Map<number, string>();
+  /**
+   * Deleting for good is the one irreversible thing this UI does, so the red
+   * button arms on the first click and acts on the second.
+   */
+  let confirmPurge: string | null = null;
+  let bin: BinEntry[] = [];
+  const rowHits = new Map<number, RowHits>();
   let health: HealthReport | null = null;
+
+  // Row buttons live in a right-aligned strip: [♻/↩] [✗] [✕].
+  const BTN_SLOTS = 3;
+  const BTN_STRIDE = 2;
+  const BTN_W = BTN_SLOTS * BTN_STRIDE;
+  const slotX = (slot: number) => cols - 1 - (BTN_SLOTS - 1 - slot) * BTN_STRIDE;
+  /** The red ✗, brightened while it is armed for a confirming second click. */
+  const purgeMark = (armed: boolean) =>
+    armed
+      ? `${ESC}[48;5;196m${ESC}[38;5;231m${ESC}[1m✗${ESC}[0m`
+      : `${ESC}[38;5;203m✗${ESC}[0m`;
 
   let tornDown = false;
 
@@ -148,13 +185,34 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     };
   }
 
-  function rightRows(): Array<
-    { kind: "new" } | { kind: "blank" } | { kind: "session"; s: SessionView }
+  /** The left column: one row per project, plus the recycle bin when used. */
+  function leftRows(): Array<
+    { kind: "project"; p: ProjectView } | { kind: "bin" }
   > {
+    const list: Array<{ kind: "project"; p: ProjectView } | { kind: "bin" }> =
+      projects.map((p) => ({ kind: "project" as const, p }));
+    if (bin.length > 0) list.push({ kind: "bin" as const });
+    return list;
+  }
+
+  /** The bin is a pseudo-project living one past the real ones. */
+  const binSelected = () =>
+    bin.length > 0 && selectedProject === projects.length;
+
+  function rightRows(): Array<
+    | { kind: "new" }
+    | { kind: "blank" }
+    | { kind: "session"; s: SessionView }
+    | { kind: "binned"; e: BinEntry }
+  > {
+    if (binSelected()) return bin.map((e) => ({ kind: "binned", e }));
     const proj = projects[selectedProject];
     if (!proj) return [];
     const list: Array<
-      { kind: "new" } | { kind: "blank" } | { kind: "session"; s: SessionView }
+      | { kind: "new" }
+      | { kind: "blank" }
+      | { kind: "session"; s: SessionView }
+      | { kind: "binned"; e: BinEntry }
     > = [{ kind: "new" }, { kind: "blank" }];
     for (const s of proj.sessions) list.push({ kind: "session", s });
     return list;
@@ -163,7 +221,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   function clampScroll() {
     const leftVisible = leftRegion.y1 - leftRegion.y0 + 1;
     const rightVisible = rightRegion.y1 - rightRegion.y0 + 1;
-    const maxLeft = Math.max(0, projects.length - leftVisible);
+    const maxLeft = Math.max(0, leftRows().length - leftVisible);
     const maxRight = Math.max(0, rightRows().length - rightVisible);
     if (leftScroll > maxLeft) leftScroll = maxLeft;
     if (leftScroll < 0) leftScroll = 0;
@@ -174,7 +232,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
   function render() {
     computeLayout();
     clampScroll();
-    closeHits.clear();
+    rowHits.clear();
     const lines: string[] = [];
     lines.push(`${ESC}[H${ESC}[2J`);
 
@@ -195,15 +253,26 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
       `${ESC}[1;${detachRegion.x0}H${ESC}[48;5;238m${ESC}[38;5;255m${detachLabel}${ESC}[0m`,
     );
 
-    const hintText = "↑↓ move  ←→ column  ⏎ open  ✕ close  q detach";
+    const inBin = binSelected();
+    const armed = confirmPurge !== null;
+    const hintText = armed
+      ? "⚠ click ✗ again to delete for good"
+      : inBin
+        ? "↑↓ move  ↩ restore  ✗ delete for good  q detach"
+        : "↑↓ move  ←→ column  ⏎ open  ♻ recycle  ✗ delete  ✕ close  q detach";
     const hintX = Math.max(14, Math.floor((cols - hintText.length) / 2));
     if (hintX + hintText.length < detachRegion.x0 - 1) {
-      lines.push(`${ESC}[1;${hintX}H${ESC}[38;5;240m${hintText}${ESC}[0m`);
+      const hintStyle = armed ? `${ESC}[1m${ESC}[38;5;203m` : `${ESC}[38;5;240m`;
+      lines.push(`${ESC}[1;${hintX}H${hintStyle}${hintText}${ESC}[0m`);
     }
 
     const proj = projects[selectedProject];
     const leftHdr = focus === "left" ? `${ESC}[38;5;39m▸ PROJECTS` : "PROJECTS";
-    const rightHdrLabel = proj ? `SESSIONS — ${proj.label}` : "SESSIONS";
+    const rightHdrLabel = inBin
+      ? `♻ RECYCLE BIN (${bin.length})`
+      : proj
+        ? `SESSIONS — ${proj.label}`
+        : "SESSIONS";
     const rightHdr =
       focus === "right" ? `${ESC}[38;5;39m▸ ${rightHdrLabel}` : rightHdrLabel;
     lines.push(
@@ -218,16 +287,24 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     }
 
     const leftVisible = leftRegion.y1 - leftRegion.y0 + 1;
-    if (projects.length === 0) {
+    const lrows = leftRows();
+    if (lrows.length === 0) {
       lines.push(`${ESC}[${leftRegion.y0};1H${ESC}[2mNo projects${ESC}[0m`);
     }
     for (let i = 0; i < leftVisible; i++) {
       const idx = i + leftScroll;
-      if (idx >= projects.length) break;
-      const p = projects[idx]!;
+      const row = lrows[idx];
+      if (!row) break;
       const y = leftRegion.y0 + i;
-      const dot = p.liveCount > 0 ? `${ESC}[38;5;42m●${ESC}[0m ` : "  ";
-      const label = `${p.label}  (${p.liveCount}/${p.sessions.length})`;
+      let dot: string;
+      let label: string;
+      if (row.kind === "bin") {
+        dot = `${ESC}[38;5;208m♻${ESC}[0m `;
+        label = `recycle bin  (${bin.length})`;
+      } else {
+        dot = row.p.liveCount > 0 ? `${ESC}[38;5;42m●${ESC}[0m ` : "  ";
+        label = `${row.p.label}  (${row.p.liveCount}/${row.p.sessions.length})`;
+      }
       const isSel = idx === selectedProject;
       const text = padEnd(` ${dot}${label}`, leftColW);
       if (isSel && focus === "left") {
@@ -242,7 +319,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     const rrows = rightRows();
     const rightVisible = rightRegion.y1 - rightRegion.y0 + 1;
     const rightW = cols - rightRegion.x0 + 1;
-    if (!proj) {
+    if (!proj && !inBin) {
       lines.push(
         `${ESC}[${rightRegion.y0};${rightRegion.x0}H${ESC}[2mSelect a project ←${ESC}[0m`,
       );
@@ -268,16 +345,34 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
           lines.push(
             `${ESC}[${y};${rightRegion.x0}H${selOn}${isSel ? "" : `${ESC}[38;5;245m`}${txt}${ESC}[0m`,
           );
+        } else if (row.kind === "binned") {
+          // Bin rows carry only the two buttons: restore, and delete for good.
+          const e = row.e;
+          const rt = relTime(e.hiddenAt);
+          const titleW = Math.max(4, rightW - 4 - rt.length - BTN_W);
+          const t = truncate(e.title || "(untitled)", titleW);
+          if (isSel) {
+            const body = padEnd(
+              ` ♻ ${padEnd(t, titleW)} ${rt}`,
+              rightW - BTN_W,
+            );
+            lines.push(`${ESC}[${y};${rightRegion.x0}H${selOn}${body}${selOff}`);
+          } else {
+            const body = ` ${ESC}[38;5;208m♻${ESC}[0m ${padEnd(t, titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`;
+            lines.push(`${ESC}[${y};${rightRegion.x0}H${body}`);
+          }
+          rowHits.set(y, { restore: e, purgeBin: e });
+          lines.push(`${ESC}[${y};${slotX(0)}H${ESC}[38;5;42m↩${ESC}[0m`);
+          lines.push(`${ESC}[${y};${slotX(1)}H${purgeMark(confirmPurge === e.id)}`);
         } else {
           const s = row.s;
           const rt = relTime(s.updated);
-          const closeW = s.live ? 2 : 0;
-          const titleW = Math.max(4, rightW - 4 - rt.length - closeW - 1);
+          const titleW = Math.max(4, rightW - 4 - rt.length - BTN_W);
           const t = truncate(s.title || "(untitled)", titleW);
           if (isSel) {
             const body = padEnd(
               ` ${s.live ? "●" : "○"} ${padEnd(t, titleW)} ${rt}`,
-              rightW - closeW,
+              rightW - BTN_W,
             );
             lines.push(`${ESC}[${y};${rightRegion.x0}H${selOn}${body}${selOff}`);
           } else {
@@ -287,9 +382,16 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
             const body = ` ${dot} ${padEnd(t, titleW)} ${ESC}[38;5;244m${rt}${ESC}[0m`;
             lines.push(`${ESC}[${y};${rightRegion.x0}H${body}`);
           }
+          rowHits.set(y, {
+            recycle: s,
+            purge: s,
+            close: s.live ? s.windowId : undefined,
+          });
+          // Orange: hide it (reversible). Red: delete it (armed first).
+          lines.push(`${ESC}[${y};${slotX(0)}H${ESC}[38;5;208m♻${ESC}[0m`);
+          lines.push(`${ESC}[${y};${slotX(1)}H${purgeMark(confirmPurge === s.id)}`);
           if (s.live && s.windowId) {
-            closeHits.set(y, s.windowId);
-            lines.push(`${ESC}[${y};${cols - 1}H${ESC}[38;5;203m✕${ESC}[0m`);
+            lines.push(`${ESC}[${y};${slotX(2)}H${ESC}[38;5;203m✕${ESC}[0m`);
           }
         }
       }
@@ -314,6 +416,8 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     const rrows = rightRows();
     const row = rrows[idx];
     if (!row) return;
+    // Bin rows act only through their buttons.
+    if (row.kind === "binned") return;
     const proj = projects[selectedProject];
     if (!proj) return;
     if (row.kind === "new") {
@@ -323,6 +427,18 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
     } else {
       void actions.openSession(row.s).then(refresh).catch(() => {});
     }
+  }
+
+  /** Arm the red button; a second click within the window is what deletes. */
+  function armPurge(id: string) {
+    confirmPurge = id;
+    render();
+    setTimeout(() => {
+      if (confirmPurge === id) {
+        confirmPurge = null;
+        render();
+      }
+    }, 4000);
   }
 
   function hitTest(x: number, y: number): void {
@@ -349,10 +465,46 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
       void actions.detach().catch(() => {});
       return;
     }
-    const winId = closeHits.get(y);
-    if (winId && (x === cols - 1 || x === cols)) {
-      void actions.closeSession(winId).then(refresh).catch(() => {});
-      return;
+    const hits = rowHits.get(y);
+    if (hits) {
+      if ((x === slotX(2) || x === cols) && hits.close) {
+        void actions.closeSession(hits.close).then(refresh).catch(() => {});
+        return;
+      }
+      if (x === slotX(1)) {
+        if (hits.purgeBin) {
+          if (confirmPurge === hits.purgeBin.id) {
+            confirmPurge = null;
+            void actions.purgeFromBin(hits.purgeBin).then(refresh).catch(() => {});
+          } else {
+            armPurge(hits.purgeBin.id);
+          }
+          return;
+        }
+        if (hits.purge) {
+          if (confirmPurge === hits.purge.id) {
+            confirmPurge = null;
+            void actions.purge(hits.purge).then(refresh).catch(() => {});
+          } else {
+            armPurge(hits.purge.id);
+          }
+          return;
+        }
+      }
+      if (x === slotX(0)) {
+        if (hits.restore) {
+          void actions.restore(hits.restore).then(refresh).catch(() => {});
+          return;
+        }
+        if (hits.recycle) {
+          void actions.recycle(hits.recycle).then(refresh).catch(() => {});
+          return;
+        }
+      }
+    }
+    if (confirmPurge) {
+      confirmPurge = null;
+      render();
     }
     if (
       x >= leftRegion.x0 &&
@@ -361,7 +513,7 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
       y <= leftRegion.y1
     ) {
       const idx = y - leftRegion.y0 + leftScroll;
-      if (idx >= 0 && idx < projects.length) {
+      if (idx >= 0 && idx < leftRows().length) {
         focus = "left";
         selectedProject = idx;
         selectedRow = 0;
@@ -413,11 +565,9 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
   function moveVert(delta: number) {
     if (focus === "left") {
-      if (projects.length === 0) return;
-      selectedProject = Math.max(
-        0,
-        Math.min(projects.length - 1, selectedProject + delta),
-      );
+      const n = leftRows().length;
+      if (n === 0) return;
+      selectedProject = Math.max(0, Math.min(n - 1, selectedProject + delta));
       selectedRow = 0;
       rightScroll = 0;
     } else {
@@ -468,7 +618,9 @@ export async function runDashboard(actions: DashboardActions): Promise<void> {
 
   async function refresh() {
     projects = await actions.loadProjects();
-    if (selectedProject >= projects.length) selectedProject = 0;
+    bin = await actions.loadBin();
+    if (selectedProject >= leftRows().length) selectedProject = 0;
+    if (selectedRow >= rightRows().length) selectedRow = 0;
     render();
   }
 
@@ -643,6 +795,31 @@ function makeFakeActions(): DashboardActions {
       await Bun.write(
         "/tmp/topencode-dash-test.log",
         `blankTab ${dir} ${new Date().toISOString()}\n`,
+      );
+    },
+    loadBin: async () => [],
+    recycle: async (s) => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `recycle ${s.id} ${new Date().toISOString()}\n`,
+      );
+    },
+    purge: async (s) => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `purge ${s.id} ${new Date().toISOString()}\n`,
+      );
+    },
+    restore: async (e) => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `restore ${e.id} ${new Date().toISOString()}\n`,
+      );
+    },
+    purgeFromBin: async (e) => {
+      await Bun.write(
+        "/tmp/topencode-dash-test.log",
+        `purgeFromBin ${e.id} ${new Date().toISOString()}\n`,
       );
     },
   };

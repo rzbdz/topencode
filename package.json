@@ -1,6 +1,6 @@
 {
   "name": "topencode",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TUI + tmux session manager for coding agents (opencode and Claude Code), attachable over ssh",
   "type": "module",
   "bin": {
